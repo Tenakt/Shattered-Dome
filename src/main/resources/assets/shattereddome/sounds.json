@@ -1,0 +1,17 @@
+{
+  "siren_warning": {
+    "category": "master",
+    "sounds": [
+      {
+        "name": "shattereddome:siren_warning",
+        "stream": true
+      }
+    ]
+  },
+  "meteor_impact": {
+    "category": "master",
+    "sounds": [
+      "shattereddome:meteor_impact"
+    ]
+  }
+}
