@@ -1,25 +1,9 @@
-
-Installation information
-=======
-
-This template repository can be directly cloned to get you started with a new
-mod. Simply create a new repository cloned from this one, by following the
-instructions provided by [GitHub](https://docs.github.com/en/repositories/creating-and-managing-repositories/creating-a-repository-from-a-template).
-
-Once you have your clone, simply open the repository in the IDE of your choice. The usual recommendation for an IDE is either IntelliJ IDEA or Eclipse.
-
-If at any point you are missing libraries in your IDE, or you've run into problems you can
-run `gradlew --refresh-dependencies` to refresh the local cache. `gradlew clean` to reset everything 
-{this does not affect your code} and then start the process again.
-
-Mapping Names:
-============
-By default, the MDK is configured to use the official mapping names from Mojang for methods and fields 
-in the Minecraft codebase. These names are covered by a specific license. All modders should be aware of this
-license. For the latest license text, refer to the mapping file itself, or the reference copy here:
-https://github.com/NeoForged/NeoForm/blob/main/Mojang.md
-
-Additional Resources: 
-==========
-Community Documentation: https://docs.neoforged.net/  
-NeoForged Discord: https://discord.neoforged.net/
+Мод должен базироваться на 1.21.1 NeoForge
+Что касается функционала 
+1. В моде должны присутствовать красивые звездопады которые будут длиться около 10-30 минут реального времени. С перерывами в 2-4 часа 
+2. В моде должна быть команда для ломания неба, вот видео материал как оно должно ломаться 
+3. Должен быть функционал того чтобы игроки не могли улитеть дальше 10к блоков без последствий последствия это тряска экрана, потом потимнение в глазах и потом мгновенная смерть по неизвестной причине. Желательно добавить команду чтобы можно было выбирать радиус с которого начинается зона вот примерные видео материалы:
+4.  В моде должны быть красивые метеориты которые будут падать с громкой сиреной (на подобе воздушной опасности)  раз в энное время (желательно тоже добавить команду для настройки подения метеоритов) 
+5. Не знаю можно ли такое сделать но вот видео материал:
+6. Это разломы которые красиво будут появляться как в человеке пауке вот картинка. 
+На этом наверное всё
