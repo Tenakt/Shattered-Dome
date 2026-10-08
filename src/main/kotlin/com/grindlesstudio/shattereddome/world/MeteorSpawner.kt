@@ -55,7 +55,7 @@ object MeteorSpawner {
 
         val power = data.meteorExplosionPower.toInt()
 
-        val spawnY = (surfaceY + 80.0).coerceAtMost(
+        val spawnY = (surfaceY + 320.0).coerceAtMost(
             (level.maxBuildHeight - 10).toDouble()
         )
 
