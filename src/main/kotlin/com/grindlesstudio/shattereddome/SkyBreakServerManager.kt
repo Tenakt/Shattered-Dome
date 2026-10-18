@@ -1,6 +1,5 @@
-package com.grindlesstudio.shattereddome.server
+package com.grindlesstudio.shattereddome
 
-import com.grindlesstudio.shattereddome.ShatteredDome
 import com.grindlesstudio.shattereddome.command.DomeCommands
 import com.grindlesstudio.shattereddome.entity.MeteorEntity
 import com.grindlesstudio.shattereddome.network.SyncSkyBreakPayload
@@ -12,6 +11,7 @@ import net.minecraft.server.level.ServerPlayer
 import net.minecraft.sounds.SoundEvents
 import net.minecraft.sounds.SoundSource
 import net.minecraft.world.level.GameRules
+import net.minecraft.world.level.Level
 import net.minecraft.world.phys.Vec3
 import net.neoforged.bus.api.SubscribeEvent
 import net.neoforged.fml.common.EventBusSubscriber
@@ -19,6 +19,8 @@ import net.neoforged.neoforge.event.RegisterCommandsEvent
 import net.neoforged.neoforge.event.entity.player.PlayerEvent
 import net.neoforged.neoforge.event.tick.ServerTickEvent
 import net.neoforged.neoforge.network.PacketDistributor
+import kotlin.math.cos
+import kotlin.math.sin
 import kotlin.random.Random
 
 enum class SkyBreakPhase {
@@ -29,6 +31,7 @@ enum class SkyBreakPhase {
 }
 
 object SkyBreakServerManager {
+
     var phase = SkyBreakPhase.INACTIVE
     var nightTimer = 0
     var riftProgress = 0f
@@ -36,69 +39,72 @@ object SkyBreakServerManager {
     private const val TARGET_NIGHT_TIME = 18000L
     private const val NIGHT_TRANSITION_TICKS = 100
 
+    // Интервал между падающими звёздами.
+    private var starfallSpawnCooldown = 0
+
     fun startSkyBreak(level: ServerLevel) {
         phase = SkyBreakPhase.NIGHT_TRANSITION
         nightTimer = 0
         riftProgress = 0f
+        starfallSpawnCooldown = 0
 
         val data = DomeWorldData.get(level)
         data.isSkyBroken = true
         data.isStarfallActive = true
         data.setDirty()
 
-        PacketDistributor.sendToAllPlayers(SyncSkyBreakPayload(isBroken = true, riftProgress = 0f))
+        PacketDistributor.sendToAllPlayers(
+            SyncSkyBreakPayload(
+                isBroken = true,
+                riftProgress = 0f
+            )
+        )
     }
 
     fun stopSkyBreak(level: ServerLevel) {
         phase = SkyBreakPhase.INACTIVE
         riftProgress = 0f
+        nightTimer = 0
+        starfallSpawnCooldown = 0
 
         val data = DomeWorldData.get(level)
         data.isSkyBroken = false
         data.isStarfallActive = false
         data.setDirty()
 
-        PacketDistributor.sendToAllPlayers(SyncSkyBreakPayload(isBroken = false, riftProgress = 0f))
-    }
-
-    // Запуск Огромного Гигантского Метеорита
-    fun spawnGiantMeteor(level: ServerLevel, player: ServerPlayer) {
-        // Спавн высоко над тучами (Y = 360) и за пределом видимости
-        val startX = player.x + Random.nextDouble(-350.0, 350.0)
-        val startY = 360.0
-        val startZ = player.z - 450.0
-
-        // Направление полёта с комфортной ускоренной скоростью (scale = 0.75)
-        val dir = Vec3(player.x - startX, -50.0, player.z + 450.0 - startZ).normalize().scale(0.75)
-
-        val giant = MeteorEntity(
-            level = level,
-            x = startX,
-            y = startY,
-            z = startZ,
-            velocity = dir,
-            type = MeteorEntity.MeteorType.GIANT,
-            power = 15
+        PacketDistributor.sendToAllPlayers(
+            SyncSkyBreakPayload(
+                isBroken = false,
+                riftProgress = 0f
+            )
         )
-        level.addFreshEntity(giant)
     }
 
     fun tick(level: ServerLevel) {
         val data = DomeWorldData.get(level)
 
-        // --- Звездопад: Светящиеся полосы на высоте Y = 350..420 ---
+        // Звездопад: одна звезда примерно раз в 1–3 секунды.
         if (data.isStarfallActive && level.players().isNotEmpty()) {
-            if (level.random.nextInt(2) == 0) {
+            if (starfallSpawnCooldown > 0) {
+                starfallSpawnCooldown--
+            } else {
                 val player = level.players().random()
-                val starX = player.x + Random.nextDouble(-250.0, 250.0)
-                val starY = Random.nextDouble(350.0, 420.0) // Очень высоко в небе
-                val starZ = player.z + Random.nextDouble(-250.0, 250.0)
 
-                // Высокая гиперзвуковая скорость пролёта полосы света
-                val starVel = Vec3(
-                    Random.nextDouble(-10.0, 10.0),
-                    Random.nextDouble(-1.5, -0.2),
-                    Random.nextDouble(-10.0, 10.0)
+                // Создаём звёзды рядом с игроком по горизонтали.
+                val starX = player.x + Random.nextDouble(-55.0, 55.0)
+                val starZ = player.z + Random.nextDouble(-55.0, 55.0)
+
+                // Высота относительно игрока.
+                val starY = player.y + Random.nextDouble(35.0, 65.0)
+
+                // Умеренная скорость по диагонали и вниз.
+                val angle = Random.nextDouble(0.0, Math.PI * 2.0)
+                val speed = Random.nextDouble(0.8, 1.4)
+
+                val starVelocity = Vec3(
+                    cos(angle) * speed,
+                    Random.nextDouble(-0.55, -0.25),
+                    sin(angle) * speed
                 )
 
                 val star = MeteorEntity(
@@ -106,20 +112,30 @@ object SkyBreakServerManager {
                     x = starX,
                     y = starY,
                     z = starZ,
-                    velocity = starVel,
+                    velocity = starVelocity,
                     type = MeteorEntity.MeteorType.STAR,
                     power = 0
                 )
+
                 level.addFreshEntity(star)
+
+                starfallSpawnCooldown = Random.nextInt(20, 61)
             }
         }
 
         when (phase) {
             SkyBreakPhase.NIGHT_TRANSITION -> {
                 nightTimer++
+
                 val currentDayTime = level.dayTime % 24000L
-                val diff = (TARGET_NIGHT_TIME - currentDayTime + 24000L) % 24000L
-                val step = diff / (NIGHT_TRANSITION_TICKS - nightTimer + 1)
+                val diff =
+                    (TARGET_NIGHT_TIME - currentDayTime + 24000L) % 24000L
+
+                val remainingTicks =
+                    (NIGHT_TRANSITION_TICKS - nightTimer + 1)
+                        .coerceAtLeast(1)
+
+                val step = diff / remainingTicks
 
                 level.setDayTime(level.dayTime + step)
 
@@ -128,7 +144,10 @@ object SkyBreakServerManager {
                     level.dayTime,
                     level.gameRules.getBoolean(GameRules.RULE_DAYLIGHT)
                 )
-                for (p in level.players()) p.connection.send(timePacket)
+
+                for (player in level.players()) {
+                    player.connection.send(timePacket)
+                }
 
                 if (nightTimer >= NIGHT_TRANSITION_TICKS) {
                     level.setDayTime(TARGET_NIGHT_TIME)
@@ -137,25 +156,66 @@ object SkyBreakServerManager {
             }
 
             SkyBreakPhase.EXPLOSION -> {
-                for (p in level.players()) {
-                    level.playSound(null, p.blockPosition(), SoundEvents.GENERIC_EXPLODE.value(), SoundSource.WEATHER, 5.0f, 0.6f)
-                    level.playSound(null, p.blockPosition(), SoundEvents.LIGHTNING_BOLT_THUNDER, SoundSource.WEATHER, 3.0f, 0.8f)
-                    level.sendParticles(p, ParticleTypes.EXPLOSION_EMITTER, true, p.x, p.y + 40.0, p.z, 5, 2.0, 2.0, 2.0, 0.1)
+                for (player in level.players()) {
+                    level.playSound(
+                        null,
+                        player.blockPosition(),
+                        SoundEvents.GENERIC_EXPLODE.value(),
+                        SoundSource.WEATHER,
+                        5.0f,
+                        0.6f
+                    )
+
+                    level.playSound(
+                        null,
+                        player.blockPosition(),
+                        SoundEvents.LIGHTNING_BOLT_THUNDER,
+                        SoundSource.WEATHER,
+                        3.0f,
+                        0.8f
+                    )
+
+                    level.sendParticles(
+                        player,
+                        ParticleTypes.EXPLOSION_EMITTER,
+                        true,
+                        player.x,
+                        player.y + 40.0,
+                        player.z,
+                        5,
+                        2.0,
+                        2.0,
+                        2.0,
+                        0.1
+                    )
                 }
+
                 phase = SkyBreakPhase.RIFT_GROWTH
                 riftProgress = 0.01f
-                PacketDistributor.sendToAllPlayers(SyncSkyBreakPayload(isBroken = true, riftProgress = riftProgress))
+
+                PacketDistributor.sendToAllPlayers(
+                    SyncSkyBreakPayload(
+                        isBroken = true,
+                        riftProgress = riftProgress
+                    )
+                )
             }
 
             SkyBreakPhase.RIFT_GROWTH -> {
                 if (riftProgress < 1.0f) {
-                    riftProgress += 0.0012f
-                    if (riftProgress > 1.0f) riftProgress = 1.0f
-                    PacketDistributor.sendToAllPlayers(SyncSkyBreakPayload(isBroken = true, riftProgress = riftProgress))
+                    riftProgress =
+                        (riftProgress + 0.0012f).coerceAtMost(1.0f)
+
+                    PacketDistributor.sendToAllPlayers(
+                        SyncSkyBreakPayload(
+                            isBroken = true,
+                            riftProgress = riftProgress
+                        )
+                    )
                 }
             }
 
-            SkyBreakPhase.INACTIVE -> {}
+            SkyBreakPhase.INACTIVE -> Unit
         }
     }
 }
@@ -166,8 +226,7 @@ object SkyBreakServerEvents {
     @SubscribeEvent
     @JvmStatic
     fun onServerTick(event: ServerTickEvent.Post) {
-        val server = event.server
-        val overworld = server.getLevel(net.minecraft.world.level.Level.OVERWORLD) ?: return
+        val overworld = event.server.getLevel(Level.OVERWORLD) ?: return
         SkyBreakServerManager.tick(overworld)
     }
 
@@ -175,8 +234,17 @@ object SkyBreakServerEvents {
     @JvmStatic
     fun onPlayerJoin(event: PlayerEvent.PlayerLoggedInEvent) {
         val player = event.entity as? ServerPlayer ?: return
-        val isBroken = SkyBreakServerManager.phase != SkyBreakPhase.INACTIVE
-        PacketDistributor.sendToPlayer(player, SyncSkyBreakPayload(isBroken, SkyBreakServerManager.riftProgress))
+
+        val isBroken =
+            SkyBreakServerManager.phase != SkyBreakPhase.INACTIVE
+
+        PacketDistributor.sendToPlayer(
+            player,
+            SyncSkyBreakPayload(
+                isBroken,
+                SkyBreakServerManager.riftProgress
+            )
+        )
     }
 
     @SubscribeEvent

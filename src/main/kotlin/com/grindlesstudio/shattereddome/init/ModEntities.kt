@@ -9,14 +9,22 @@ import net.neoforged.neoforge.registries.DeferredHolder
 import net.neoforged.neoforge.registries.DeferredRegister
 
 object ModEntities {
-    val ENTITIES: DeferredRegister<EntityType<*>> =
-        DeferredRegister.create(Registries.ENTITY_TYPE, ShatteredDome.MOD_ID)
 
-    val METEOR: DeferredHolder<EntityType<*>, EntityType<MeteorEntity>> = ENTITIES.register("meteor") { ->
-        EntityType.Builder.of(::MeteorEntity, MobCategory.MISC)
-            .sized(2.0f, 2.0f)
-            .clientTrackingRange(16)
-            .updateInterval(1)
-            .build("meteor")
-    }
+    val ENTITIES: DeferredRegister<EntityType<*>> =
+        DeferredRegister.create(
+            Registries.ENTITY_TYPE,
+            ShatteredDome.MOD_ID
+        )
+
+    val METEOR: DeferredHolder<EntityType<*>, EntityType<MeteorEntity>> =
+        ENTITIES.register(
+            "meteor",
+            java.util.function.Supplier<EntityType<MeteorEntity>> {
+                EntityType.Builder.of(::MeteorEntity, MobCategory.MISC)
+                    .sized(2.0f, 2.0f)
+                    .clientTrackingRange(64)
+                    .updateInterval(1)
+                    .build("meteor")
+            }
+        )
 }

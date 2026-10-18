@@ -2,7 +2,7 @@ package com.grindlesstudio.shattereddome.event
 
 import com.grindlesstudio.shattereddome.ShatteredDome
 import com.grindlesstudio.shattereddome.network.SyncSkyBreakPayload
-import com.grindlesstudio.shattereddome.server.SkyBreakServerManager
+import com.grindlesstudio.shattereddome.SkyBreakServerManager
 import com.grindlesstudio.shattereddome.world.DomeWorldData
 import net.minecraft.server.level.ServerPlayer
 import net.neoforged.bus.api.SubscribeEvent

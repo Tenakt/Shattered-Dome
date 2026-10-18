@@ -1,3 +1,4 @@
+
 package com.grindlesstudio.shattereddome.client
 
 import com.grindlesstudio.shattereddome.ShatteredDome
@@ -20,7 +21,7 @@ import net.neoforged.neoforge.client.event.ViewportEvent
 object SkyBreakClientState {
     var isBroken: Boolean = false
     var riftProgress: Float = 0f
-    var skyFlashIntensity: Float = 0f // Интенсивность озарения неба
+    var skyFlashIntensity: Float = 0f
 }
 
 class SkyBreakSirenSound : AbstractTickableSoundInstance(
@@ -40,7 +41,9 @@ class SkyBreakSirenSound : AbstractTickableSoundInstance(
     fun stopSiren() = stop()
 
     override fun tick() {
-        if (!SkyBreakClientState.isBroken) stop()
+        if (!SkyBreakClientState.isBroken) {
+            stop()
+        }
     }
 }
 
@@ -112,8 +115,15 @@ object SkyBreakClientHandler {
     fun onClientTick(event: ClientTickEvent.Post) {
         val mc = Minecraft.getInstance()
 
+        // Обновляем анимацию всегда, чтобы она сбрасывалась после остановки.
+        SkyRiftRenderer.tickMeteor()
+
         if (SkyBreakClientState.isBroken) {
-            if (siren == null || siren!!.isStopped || !mc.soundManager.isActive(siren!!)) {
+            if (
+                siren == null ||
+                siren!!.isStopped ||
+                !mc.soundManager.isActive(siren!!)
+            ) {
                 siren = SkyBreakSirenSound()
                 mc.soundManager.play(siren!!)
             }
