@@ -12,6 +12,7 @@ import net.minecraft.sounds.SoundEvents
 import net.minecraft.sounds.SoundSource
 import net.minecraft.world.level.GameRules
 import net.minecraft.world.level.Level
+import net.minecraft.world.level.levelgen.Heightmap
 import net.minecraft.world.phys.Vec3
 import net.neoforged.bus.api.SubscribeEvent
 import net.neoforged.fml.common.EventBusSubscriber
@@ -42,11 +43,23 @@ object SkyBreakServerManager {
     // Интервал между падающими звёздами.
     private var starfallSpawnCooldown = 0
 
+    // Таймер подлёта большого метеорита.
+    // Должен совпадать с METEOR_DURATION в SkyRiftRenderer.
+    private var meteorBurstTimer = 0
+    private var meteorBurstSpawned = false
+
+    private const val METEOR_BURST_TICKS = 2400
+    private const val PHYSICAL_FRAGMENT_COUNT = 8
+    private const val DECORATIVE_FRAGMENT_COUNT = 22
+    private const val METEOR_BURST_HEIGHT = 600
+
     fun startSkyBreak(level: ServerLevel) {
         phase = SkyBreakPhase.NIGHT_TRANSITION
         nightTimer = 0
         riftProgress = 0f
         starfallSpawnCooldown = 0
+        meteorBurstTimer = 0
+        meteorBurstSpawned = false
 
         val data = DomeWorldData.get(level)
         data.isSkyBroken = true
@@ -66,6 +79,8 @@ object SkyBreakServerManager {
         riftProgress = 0f
         nightTimer = 0
         starfallSpawnCooldown = 0
+        meteorBurstTimer = 0
+        meteorBurstSpawned = false
 
         val data = DomeWorldData.get(level)
         data.isSkyBroken = false
@@ -80,8 +95,100 @@ object SkyBreakServerManager {
         )
     }
 
+    /**
+     * Создаёт осколки только после того, как большой метеорит взорвался.
+     * Первые PHYSICAL_FRAGMENT_COUNT осколков физические,
+     * остальные — декоративные.
+     */
+    fun spawnMeteorFragmentBurst(
+        level: ServerLevel,
+        player: ServerPlayer
+    ) {
+        val totalFragments =
+            PHYSICAL_FRAGMENT_COUNT + DECORATIVE_FRAGMENT_COUNT
+
+        repeat(totalFragments) { index ->
+            val fragmentX = player.x + Random.nextDouble(-18.0, 18.0)
+            val fragmentZ = player.z + Random.nextDouble(-18.0, 18.0)
+
+            val groundY = level.getHeight(
+                Heightmap.Types.MOTION_BLOCKING,
+                fragmentX.toInt(),
+                fragmentZ.toInt()
+            )
+
+            val spawnY = groundY + METEOR_BURST_HEIGHT
+
+            val angle = Random.nextDouble(0.0, Math.PI * 2.0)
+            val horizontalSpeed = Random.nextDouble(0.4, 2.0)
+
+            val velocity = Vec3(
+                cos(angle) * horizontalSpeed,
+                -Random.nextDouble(1.8, 3.2),
+                sin(angle) * horizontalSpeed
+            )
+
+            val isPhysical = index < PHYSICAL_FRAGMENT_COUNT
+
+            val fragment = MeteorEntity(
+                level = level,
+                x = fragmentX,
+                y = spawnY.toDouble(),
+                z = fragmentZ,
+                velocity = velocity,
+                type = if (isPhysical) {
+                    MeteorEntity.MeteorType.FRAGMENT
+                } else {
+                    MeteorEntity.MeteorType.DECORATIVE_FRAGMENT
+                },
+                power = if (isPhysical) 3 else 0
+            )
+
+            level.addFreshEntity(fragment)
+        }
+
+        // Вспышка в момент распада большой модели.
+        level.sendParticles(
+            ParticleTypes.EXPLOSION_EMITTER,
+            player.x,
+            player.y + 40.0,
+            player.z,
+            12,
+            12.0,
+            8.0,
+            12.0,
+            0.05
+        )
+
+        level.playSound(
+            null,
+            player.blockPosition(),
+            SoundEvents.GENERIC_EXPLODE.value(),
+            SoundSource.WEATHER,
+            8.0f,
+            0.45f
+        )
+    }
+
     fun tick(level: ServerLevel) {
         val data = DomeWorldData.get(level)
+
+        // В момент окончания небесной анимации появляется сама 3D-модель.
+        // Взрыв и осколки здесь не запускаются: они срабатывают при
+        // достижении цели сущностью MeteorEntity.
+        if (
+            phase != SkyBreakPhase.INACTIVE &&
+            !meteorBurstSpawned &&
+            level.players().isNotEmpty()
+        ) {
+            meteorBurstTimer++
+
+            if (meteorBurstTimer >= METEOR_BURST_TICKS) {
+                val targetPlayer = level.players().random()
+                spawnSkyfallMeteor(level, targetPlayer)
+                meteorBurstSpawned = true
+            }
+        }
 
         // Звездопад: одна звезда примерно раз в 1–3 секунды.
         if (data.isStarfallActive && level.players().isNotEmpty()) {
@@ -90,14 +197,10 @@ object SkyBreakServerManager {
             } else {
                 val player = level.players().random()
 
-                // Создаём звёзды рядом с игроком по горизонтали.
                 val starX = player.x + Random.nextDouble(-55.0, 55.0)
                 val starZ = player.z + Random.nextDouble(-55.0, 55.0)
-
-                // Высота относительно игрока.
                 val starY = player.y + Random.nextDouble(35.0, 65.0)
 
-                // Умеренная скорость по диагонали и вниз.
                 val angle = Random.nextDouble(0.0, Math.PI * 2.0)
                 val speed = Random.nextDouble(0.8, 1.4)
 
@@ -118,7 +221,6 @@ object SkyBreakServerManager {
                 )
 
                 level.addFreshEntity(star)
-
                 starfallSpawnCooldown = Random.nextInt(20, 61)
             }
         }
@@ -136,7 +238,6 @@ object SkyBreakServerManager {
                         .coerceAtLeast(1)
 
                 val step = diff / remainingTicks
-
                 level.setDayTime(level.dayTime + step)
 
                 val timePacket = ClientboundSetTimePacket(
@@ -156,6 +257,8 @@ object SkyBreakServerManager {
             }
 
             SkyBreakPhase.EXPLOSION -> {
+                // Это начальная вспышка при раскрытии разлома.
+                // Она не заменяет финальный взрыв метеорита.
                 for (player in level.players()) {
                     level.playSound(
                         null,
@@ -217,6 +320,43 @@ object SkyBreakServerManager {
 
             SkyBreakPhase.INACTIVE -> Unit
         }
+    }
+
+    private fun spawnSkyfallMeteor(
+        level: ServerLevel,
+        player: ServerPlayer
+    ) {
+        // Модель появляется сбоку и выше игрока, чтобы был виден полёт.
+        val start = Vec3(
+            player.x + 25.0,
+            player.y + 38.0,
+            player.z + 25.0
+        )
+
+        // Точка взрыва находится над игроком, а не внутри поверхности.
+        val target = Vec3(
+            player.x,
+            player.y + 18.0,
+            player.z
+        )
+
+        val meteor = MeteorEntity(
+            level = level,
+            x = start.x,
+            y = start.y,
+            z = start.z,
+            velocity = Vec3.ZERO,
+            type = MeteorEntity.MeteorType.GIANT,
+            power = 4
+        )
+
+        // Этот метод должен быть добавлен в MeteorEntity.kt.
+        meteor.configureSkyfallFlight(
+            target = target,
+            durationTicks = 55
+        )
+
+        level.addFreshEntity(meteor)
     }
 }
 

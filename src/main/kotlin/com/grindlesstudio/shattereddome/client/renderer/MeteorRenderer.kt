@@ -49,6 +49,10 @@ class MeteorRenderer(
                 poseStack.scale(1.4f, 1.4f, 1.4f)
             }
 
+            MeteorEntity.MeteorType.DECORATIVE_FRAGMENT -> {
+                poseStack.scale(1.4f, 1.4f, 1.4f)
+            }
+
             MeteorEntity.MeteorType.STAR -> {
                 // Вытянутая форма падающей звезды.
                 poseStack.scale(0.35f, 0.35f, 2.5f)

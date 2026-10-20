@@ -1,5 +1,6 @@
 package com.grindlesstudio.shattereddome.entity
 
+import com.grindlesstudio.shattereddome.SkyBreakServerManager
 import com.grindlesstudio.shattereddome.init.ModEntities
 import com.grindlesstudio.shattereddome.network.SyncScreenShakePayload
 import com.grindlesstudio.shattereddome.sound.ModSounds
@@ -35,18 +36,71 @@ class MeteorEntity : Entity {
         NORMAL,
         STAR,
         GIANT,
-        FRAGMENT
+        FRAGMENT,
+        DECORATIVE_FRAGMENT
     }
 
     private var explosionPower: Int = 4
 
     var meteorType: MeteorType
-        get() = MeteorType.entries[entityData.get(TYPE_ACCESSOR).toInt().coerceIn(0, 3)]
+        get() = MeteorType.entries[entityData.get(TYPE_ACCESSOR).toInt().coerceIn(0, 4)]
         set(value) {
             entityData.set(TYPE_ACCESSOR, value.ordinal.toByte())
         }
 
     private val playersAlreadyWarned = mutableSetOf<UUID>()
+
+    // Управляемый полёт сюжетного гигантского метеорита.
+    private var skyfallFlightActive: Boolean = false
+    private var skyfallFlightTicks: Int = 0
+    private var skyfallFlightDuration: Int = 55
+    private var skyfallTarget: Vec3 = Vec3.ZERO
+    private var skyfallImpactPending: Boolean = false
+
+    /**
+     * Запускает управляемый полёт к заданной точке.
+     * Во время такого полёта столкновения с блоками не прерывают анимацию:
+     * метеорит доходит до цели и только затем взрывается.
+     */
+    fun configureSkyfallFlight(target: Vec3, durationTicks: Int = 55) {
+        meteorType = MeteorType.GIANT
+        skyfallTarget = target
+        skyfallFlightDuration = durationTicks.coerceAtLeast(1)
+        skyfallFlightTicks = 0
+        skyfallFlightActive = true
+        skyfallImpactPending = false
+        val pos = position()
+        val direction = Vec3(
+            target.x - pos.x,
+            target.y - pos.y,
+            target.z - pos.z
+        )
+
+        deltaMovement = direction.scale(1.0 / skyfallFlightDuration)
+        setNoGravity(true)
+    }
+
+    private fun tickSkyfallFlight() {
+        skyfallFlightTicks++
+
+        val ticksRemaining = (skyfallFlightDuration - skyfallFlightTicks + 1).coerceAtLeast(1)
+        val pos = position()
+        val direction = Vec3(
+            skyfallTarget.x - pos.x,
+            skyfallTarget.y - pos.y,
+            skyfallTarget.z - pos.z
+        )
+
+        deltaMovement = direction.scale(1.0 / ticksRemaining)
+        move(MoverType.SELF, deltaMovement)
+
+        if (skyfallFlightTicks >= skyfallFlightDuration) {
+            setPos(skyfallTarget.x, skyfallTarget.y, skyfallTarget.z)
+            deltaMovement = Vec3.ZERO
+            skyfallFlightActive = false
+            skyfallImpactPending = true
+        }
+    }
 
     constructor(
         entityType: EntityType<out MeteorEntity>,
@@ -75,13 +129,23 @@ class MeteorEntity : Entity {
     override fun tick() {
         super.tick()
 
-        move(MoverType.SELF, deltaMovement)
+        if (meteorType == MeteorType.GIANT && skyfallFlightActive) {
+            tickSkyfallFlight()
+        } else {
+            move(MoverType.SELF, deltaMovement)
+        }
 
         when (meteorType) {
             MeteorType.STAR -> tickStar()
             MeteorType.NORMAL -> tickNormal()
             MeteorType.GIANT -> tickGiant()
             MeteorType.FRAGMENT -> tickFragment()
+            MeteorType.DECORATIVE_FRAGMENT -> tickDecorativeFragment()
+        }
+
+        if (skyfallImpactPending && !level().isClientSide && !isRemoved) {
+            skyfallImpactPending = false
+            onGiantImpact()
         }
 
         if (y < level().minBuildHeight) {
@@ -244,7 +308,7 @@ class MeteorEntity : Entity {
             2.0f
         )
 
-        if (tickCount > 160) {
+        if (tickCount > 400) {
             discard()
             return
         }
@@ -252,6 +316,31 @@ class MeteorEntity : Entity {
         if (onGround() || horizontalCollision || verticalCollision) {
             onImpact()
         }
+    }
+
+    private fun tickDecorativeFragment() {
+        if (level().isClientSide) {
+            spawnTrailParticles()
+            return
+        }
+
+        // Декоративные осколки не наносят урон,
+        // не взрываются и не изменяют блоки.
+        if (
+            tickCount >= 360 ||
+            onGround() ||
+            horizontalCollision ||
+            verticalCollision
+        ) {
+            discard()
+            return
+        }
+
+        spawnServerTrailParticles(
+            Color(255, 150, 45),
+            Color(190, 35, 15),
+            2.0f
+        )
     }
 
     // ------------------------------------------------------------
@@ -281,30 +370,6 @@ class MeteorEntity : Entity {
                 12.0f
             )
 
-            // Осколки отделяются раз в 70 тиков.
-            if (tickCount % 70 == 0) {
-                val sideX = Random.nextDouble(-1.2, 1.2)
-                val sideZ = Random.nextDouble(-1.2, 1.2)
-
-                val fragmentVelocity = Vec3(
-                    deltaMovement.x + sideX,
-                    -1.0 - Random.nextDouble(0.5),
-                    deltaMovement.z + sideZ
-                )
-
-                val fragment = MeteorEntity(
-                    level = serverLevel,
-                    x = x + sideX * 4.0,
-                    y = y - 3.0,
-                    z = z + sideZ * 4.0,
-                    velocity = fragmentVelocity,
-                    type = MeteorType.FRAGMENT,
-                    power = 3
-                )
-
-                serverLevel.addFreshEntity(fragment)
-            }
-
             for (player in serverLevel.players()) {
                 val distanceSquared = player.distanceToSqr(this)
 
@@ -319,7 +384,12 @@ class MeteorEntity : Entity {
                 }
             }
 
-            if (onGround() || horizontalCollision || verticalCollision) {
+            // Во время управляемого полёта столкновения не должны
+            // вызывать преждевременный взрыв.
+            if (!skyfallFlightActive &&
+                !skyfallImpactPending &&
+                (onGround() || horizontalCollision || verticalCollision)
+            ) {
                 onGiantImpact()
             }
         }
@@ -541,6 +611,13 @@ class MeteorEntity : Entity {
             )
         }
 
+        // После основного взрыва запускаем отдельный дождь осколков.
+        serverLevel.players()
+            .minByOrNull { it.distanceToSqr(this) }
+            ?.let { nearestPlayer ->
+                SkyBreakServerManager.spawnMeteorFragmentBurst(serverLevel, nearestPlayer)
+            }
+
         discard()
     }
 
@@ -563,7 +640,7 @@ class MeteorEntity : Entity {
     override fun readAdditionalSaveData(compound: CompoundTag) {
         explosionPower = compound.getInt("ExplosionPower")
         meteorType = MeteorType.entries[
-            compound.getInt("MeteorType").coerceIn(0, 3)
+            compound.getInt("MeteorType").coerceIn(0, 4)
         ]
     }
 
