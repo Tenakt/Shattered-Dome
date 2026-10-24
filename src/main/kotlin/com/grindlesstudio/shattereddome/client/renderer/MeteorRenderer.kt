@@ -1,4 +1,3 @@
-
 package com.grindlesstudio.shattereddome.client.renderer
 
 import com.grindlesstudio.shattereddome.ShatteredDome
@@ -20,14 +19,31 @@ class MeteorRenderer(
 ) : EntityRenderer<MeteorEntity>(context) {
 
     companion object {
-        private val TEXTURE = ResourceLocation.fromNamespaceAndPath(
+        // Текстура по умолчанию для обычных метеоритов
+        private val DEFAULT_TEXTURE = ResourceLocation.fromNamespaceAndPath(
             ShatteredDome.MOD_ID,
             "textures/entity/meteor.png"
+        )
+
+        // Отдельная текстура для падающей звезды
+        private val STAR_TEXTURE = ResourceLocation.fromNamespaceAndPath(
+            ShatteredDome.MOD_ID,
+            "textures/entity/star.png"
         )
     }
 
     init {
         shadowRadius = 1.0f
+    }
+
+    /**
+     * Выбирает нужный файл текстуры в зависимости от типа метеорита
+     */
+    override fun getTextureLocation(entity: MeteorEntity): ResourceLocation {
+        return when (entity.meteorType) {
+            MeteorEntity.MeteorType.STAR -> STAR_TEXTURE
+            else -> DEFAULT_TEXTURE
+        }
     }
 
     override fun render(
@@ -45,16 +61,13 @@ class MeteorRenderer(
                 poseStack.scale(180.0f, 180.0f, 180.0f)
             }
 
-            MeteorEntity.MeteorType.FRAGMENT -> {
-                poseStack.scale(1.4f, 1.4f, 1.4f)
-            }
-
+            MeteorEntity.MeteorType.FRAGMENT,
             MeteorEntity.MeteorType.DECORATIVE_FRAGMENT -> {
                 poseStack.scale(1.4f, 1.4f, 1.4f)
             }
 
             MeteorEntity.MeteorType.STAR -> {
-                // Вытянутая форма падающей звезды.
+                // Вытянутая форма падающей звезды
                 poseStack.scale(0.35f, 0.35f, 2.5f)
             }
 
@@ -63,25 +76,23 @@ class MeteorRenderer(
             }
         }
 
-        // Вращаем обычные метеориты, звёзды и осколки.
-        // Гигантский метеорит сохраняет прежнее положение.
+        // Вращение модели во время полёта
         if (entity.meteorType != MeteorEntity.MeteorType.GIANT) {
             val rotation = (entity.tickCount + partialTicks) * 10.0f
-
             poseStack.mulPose(Axis.XP.rotationDegrees(rotation))
             poseStack.mulPose(Axis.YP.rotationDegrees(rotation * 0.5f))
         }
 
         poseStack.translate(-0.5, -0.5, -0.5)
 
-        val renderLight = if (
-            entity.meteorType == MeteorEntity.MeteorType.STAR
-        ) {
+        // Звезда подсвечивается на полную яркость даже ночью
+        val renderLight = if (entity.meteorType == MeteorEntity.MeteorType.STAR) {
             LightTexture.FULL_BRIGHT
         } else {
             packedLight
         }
 
+        // getTextureLocation(entity) автоматически подставит нужную текстуру
         val builder = buffer.getBuffer(
             RenderType.entityCutoutNoCull(getTextureLocation(entity))
         )
@@ -163,9 +174,5 @@ class MeteorRenderer(
             .setOverlay(OverlayTexture.NO_OVERLAY)
             .setLight(light)
             .setNormal(nx, ny, nz)
-    }
-
-    override fun getTextureLocation(entity: MeteorEntity): ResourceLocation {
-        return TEXTURE
     }
 }

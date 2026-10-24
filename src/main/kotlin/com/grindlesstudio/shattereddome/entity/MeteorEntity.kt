@@ -1,6 +1,5 @@
 package com.grindlesstudio.shattereddome.entity
 
-import com.grindlesstudio.shattereddome.SkyBreakServerManager
 import com.grindlesstudio.shattereddome.init.ModEntities
 import com.grindlesstudio.shattereddome.network.SyncScreenShakePayload
 import com.grindlesstudio.shattereddome.sound.ModSounds
@@ -41,6 +40,7 @@ class MeteorEntity : Entity {
     }
 
     private var explosionPower: Int = 4
+    private val playersAlreadyWarned = mutableSetOf<UUID>()
 
     var meteorType: MeteorType
         get() = MeteorType.entries[entityData.get(TYPE_ACCESSOR).toInt().coerceIn(0, 4)]
@@ -48,27 +48,20 @@ class MeteorEntity : Entity {
             entityData.set(TYPE_ACCESSOR, value.ordinal.toByte())
         }
 
-    private val playersAlreadyWarned = mutableSetOf<UUID>()
-
-    // Управляемый полёт сюжетного гигантского метеорита.
-    private var skyfallFlightActive: Boolean = false
-    private var skyfallFlightTicks: Int = 0
-    private var skyfallFlightDuration: Int = 55
-    private var skyfallTarget: Vec3 = Vec3.ZERO
-    private var skyfallImpactPending: Boolean = false
-
     /**
-     * Запускает управляемый полёт к заданной точке.
-     * Во время такого полёта столкновения с блоками не прерывают анимацию:
-     * метеорит доходит до цели и только затем взрывается.
+     * Настраивает управляемый полёт от точки вспышки к скоплению игроков на высоте Y = 415.
      */
-    fun configureSkyfallFlight(target: Vec3, durationTicks: Int = 55) {
+    fun configureSkyfallFlight(target: Vec3, durationTicks: Int = 60) {
         meteorType = MeteorType.GIANT
-        skyfallTarget = target
-        skyfallFlightDuration = durationTicks.coerceAtLeast(1)
-        skyfallFlightTicks = 0
-        skyfallFlightActive = true
-        skyfallImpactPending = false
+        entityData.set(IS_SKYFALL, true)
+        entityData.set(TARGET_X, target.x.toFloat())
+        entityData.set(TARGET_Y, target.y.toFloat())
+        entityData.set(TARGET_Z, target.z.toFloat())
+        entityData.set(FLIGHT_DURATION, durationTicks.coerceAtLeast(1))
+        entityData.set(CURRENT_FLIGHT_TICKS, 0)
+
+        setNoGravity(true)
+
         val pos = position()
         val direction = Vec3(
             target.x - pos.x,
@@ -76,29 +69,40 @@ class MeteorEntity : Entity {
             target.z - pos.z
         )
 
-        deltaMovement = direction.scale(1.0 / skyfallFlightDuration)
-        setNoGravity(true)
+        deltaMovement = direction.scale(1.0 / durationTicks)
     }
 
     private fun tickSkyfallFlight() {
-        skyfallFlightTicks++
+        val currentTicks = entityData.get(CURRENT_FLIGHT_TICKS) + 1
+        val maxDuration = entityData.get(FLIGHT_DURATION)
+        entityData.set(CURRENT_FLIGHT_TICKS, currentTicks)
 
-        val ticksRemaining = (skyfallFlightDuration - skyfallFlightTicks + 1).coerceAtLeast(1)
-        val pos = position()
-        val direction = Vec3(
-            skyfallTarget.x - pos.x,
-            skyfallTarget.y - pos.y,
-            skyfallTarget.z - pos.z
+        val target = Vec3(
+            entityData.get(TARGET_X).toDouble(),
+            entityData.get(TARGET_Y).toDouble(),
+            entityData.get(TARGET_Z).toDouble()
         )
 
-        deltaMovement = direction.scale(1.0 / ticksRemaining)
+        val remainingTicks = (maxDuration - currentTicks + 1).coerceAtLeast(1)
+        val pos = position()
+        val direction = Vec3(
+            target.x - pos.x,
+            target.y - pos.y,
+            target.z - pos.z
+        )
+
+        deltaMovement = direction.scale(1.0 / remainingTicks)
         move(MoverType.SELF, deltaMovement)
 
-        if (skyfallFlightTicks >= skyfallFlightDuration) {
-            setPos(skyfallTarget.x, skyfallTarget.y, skyfallTarget.z)
+        // Подрыв при достижении высоты Y <= 415 или истечении времени полёта
+        if (currentTicks >= maxDuration || y <= 415.0) {
+            setPos(target.x, target.y, target.z)
             deltaMovement = Vec3.ZERO
-            skyfallFlightActive = false
-            skyfallImpactPending = true
+            entityData.set(IS_SKYFALL, false)
+
+            if (!level().isClientSide) {
+                explodeIntoFragments()
+            }
         }
     }
 
@@ -124,12 +128,20 @@ class MeteorEntity : Entity {
 
     override fun defineSynchedData(builder: SynchedEntityData.Builder) {
         builder.define(TYPE_ACCESSOR, MeteorType.NORMAL.ordinal.toByte())
+        builder.define(IS_SKYFALL, false)
+        builder.define(TARGET_X, 0f)
+        builder.define(TARGET_Y, 0f)
+        builder.define(TARGET_Z, 0f)
+        builder.define(FLIGHT_DURATION, 60)
+        builder.define(CURRENT_FLIGHT_TICKS, 0)
     }
 
     override fun tick() {
         super.tick()
 
-        if (meteorType == MeteorType.GIANT && skyfallFlightActive) {
+        val isSkyfall = entityData.get(IS_SKYFALL)
+
+        if (isSkyfall) {
             tickSkyfallFlight()
         } else {
             move(MoverType.SELF, deltaMovement)
@@ -143,11 +155,6 @@ class MeteorEntity : Entity {
             MeteorType.DECORATIVE_FRAGMENT -> tickDecorativeFragment()
         }
 
-        if (skyfallImpactPending && !level().isClientSide && !isRemoved) {
-            skyfallImpactPending = false
-            onGiantImpact()
-        }
-
         if (y < level().minBuildHeight) {
             discard()
         }
@@ -157,49 +164,31 @@ class MeteorEntity : Entity {
     // ЗВЕЗДОПАД
     // ------------------------------------------------------------
 
-
     private fun tickStar() {
         if (level().isClientSide) {
             val clientLevel = level() as ClientLevel
             val pos = position()
             val velocity = deltaMovement
 
-            // Увеличенный след позади звезды.
             val steps = 20
             val trailLength = 12.0
 
             for (i in 0..steps) {
                 val factor = i.toDouble() / steps
-
                 val px = pos.x - velocity.x * factor * trailLength
                 val py = pos.y - velocity.y * factor * trailLength
                 val pz = pos.z - velocity.z * factor * trailLength
 
-                // Принудительное создание частиц помогает избежать
-                // их пропуска из-за ограничения количества частиц.
-                clientLevel.addParticle(
-                    ParticleTypes.END_ROD,
-                    true,
-                    px, py, pz,
-                    0.0, 0.0, 0.0
-                )
+                clientLevel.addParticle(ParticleTypes.END_ROD, true, px, py, pz, 0.0, 0.0, 0.0)
 
-                // Дополнительное свечение вдоль следа.
                 if (i % 2 == 0) {
-                    clientLevel.addParticle(
-                        ParticleTypes.INSTANT_EFFECT,
-                        true,
-                        px, py, pz,
-                        0.0, 0.0, 0.0
-                    )
+                    clientLevel.addParticle(ParticleTypes.INSTANT_EFFECT, true, px, py, pz, 0.0, 0.0, 0.0)
                 }
             }
 
-            // Яркая голова звезды.
             repeat(4) {
                 clientLevel.addParticle(
-                    ParticleTypes.FLAME,
-                    true,
+                    ParticleTypes.FLAME, true,
                     pos.x + (random.nextDouble() - 0.5) * 0.2,
                     pos.y + (random.nextDouble() - 0.5) * 0.2,
                     pos.z + (random.nextDouble() - 0.5) * 0.2,
@@ -208,20 +197,10 @@ class MeteorEntity : Entity {
             }
         } else {
             val serverLevel = level() as ServerLevel
-
             WorldParticleBuilder.create(LodestoneParticleTypes.WISP_PARTICLE)
-                .setColorData(
-                    ColorParticleData.create(
-                        Color(180, 220, 255),
-                        Color(120, 70, 255)
-                    ).build()
-                )
-                .setScaleData(
-                    GenericParticleData.create(2.5f, 0f).build()
-                )
-                .setTransparencyData(
-                    GenericParticleData.create(0.9f, 0f).build()
-                )
+                .setColorData(ColorParticleData.create(Color(180, 220, 255), Color(120, 70, 255)).build())
+                .setScaleData(GenericParticleData.create(2.5f, 0f).build())
+                .setTransparencyData(GenericParticleData.create(0.9f, 0f).build())
                 .setLifetime(12)
                 .spawn(serverLevel, x, y, z)
 
@@ -240,21 +219,10 @@ class MeteorEntity : Entity {
             spawnTrailParticles()
         } else {
             if (tickCount % 4 == 0) {
-                level().playSound(
-                    null,
-                    blockPosition(),
-                    SoundEvents.ELYTRA_FLYING,
-                    SoundSource.HOSTILE,
-                    2.0f,
-                    0.6f
-                )
+                level().playSound(null, blockPosition(), SoundEvents.ELYTRA_FLYING, SoundSource.HOSTILE, 2.0f, 0.6f)
             }
 
-            spawnServerTrailParticles(
-                Color(220, 80, 255),
-                Color(80, 0, 160),
-                2.5f
-            )
+            spawnServerTrailParticles(Color(220, 80, 255), Color(80, 0, 160), 2.5f)
 
             if (onGround() || horizontalCollision || verticalCollision) {
                 onImpact()
@@ -282,31 +250,17 @@ class MeteorEntity : Entity {
             if (!playersAlreadyWarned.add(player.uuid)) continue
 
             val distance = sqrt(distanceSquared)
-            val intensity = (
-                    2.4 * (1.0 - distance / effectRadius)
-                    ).toFloat().coerceIn(0.25f, 2.4f)
+            val intensity = (2.4f * (1.0 - (distance / effectRadius)).toFloat()).coerceIn(0.25f, 2.4f)
 
-            player.playNotifySound(
-                SoundEvents.ELYTRA_FLYING,
-                SoundSource.AMBIENT,
-                2.0f,
-                0.65f + Random.nextFloat() * 0.45f
-            )
+            player.playNotifySound(SoundEvents.ELYTRA_FLYING, SoundSource.AMBIENT, 2.0f, 0.65f + Random.nextFloat() * 0.45f)
 
             PacketDistributor.sendToPlayer(
                 player,
-                SyncScreenShakePayload(
-                    intensity = intensity,
-                    duration = 8 + (intensity * 5).toInt()
-                )
+                SyncScreenShakePayload(intensity = intensity, duration = 8 + (intensity * 5).toInt())
             )
         }
 
-        spawnServerTrailParticles(
-            Color(255, 120, 30),
-            Color(180, 20, 10),
-            2.0f
-        )
+        spawnServerTrailParticles(Color(255, 120, 30), Color(180, 20, 10), 2.0f)
 
         if (tickCount > 400) {
             discard()
@@ -324,23 +278,12 @@ class MeteorEntity : Entity {
             return
         }
 
-        // Декоративные осколки не наносят урон,
-        // не взрываются и не изменяют блоки.
-        if (
-            tickCount >= 360 ||
-            onGround() ||
-            horizontalCollision ||
-            verticalCollision
-        ) {
+        if (tickCount >= 360 || onGround() || horizontalCollision || verticalCollision) {
             discard()
             return
         }
 
-        spawnServerTrailParticles(
-            Color(255, 150, 45),
-            Color(190, 35, 15),
-            2.0f
-        )
+        spawnServerTrailParticles(Color(255, 150, 45), Color(190, 35, 15), 2.0f)
     }
 
     // ------------------------------------------------------------
@@ -353,50 +296,95 @@ class MeteorEntity : Entity {
         } else {
             val serverLevel = level() as ServerLevel
 
-            if (tickCount % 10 == 0) {
-                serverLevel.playSound(
-                    null,
-                    blockPosition(),
-                    SoundEvents.FIREWORK_ROCKET_BLAST,
-                    SoundSource.HOSTILE,
-                    8.0f,
-                    0.25f
-                )
+            if (tickCount % 5 == 0) {
+                serverLevel.playSound(null, blockPosition(), SoundEvents.FIREWORK_ROCKET_BLAST, SoundSource.HOSTILE, 10.0f, 0.25f)
             }
 
-            spawnServerTrailParticles(
-                Color(255, 110, 10),
-                Color(180, 0, 220),
-                12.0f
-            )
+            spawnServerTrailParticles(Color(255, 110, 10), Color(180, 0, 220), 12.0f)
+
+            val isSkyfall = entityData.get(IS_SKYFALL)
+
+            if (!isSkyfall && (y <= 415.0 || onGround() || horizontalCollision || verticalCollision)) {
+                explodeIntoFragments()
+                return
+            }
 
             for (player in serverLevel.players()) {
                 val distanceSquared = player.distanceToSqr(this)
-
                 if (distanceSquared < 300.0 * 300.0) {
                     PacketDistributor.sendToPlayer(
                         player,
-                        SyncScreenShakePayload(
-                            intensity = 2.0f,
-                            duration = 15
-                        )
+                        SyncScreenShakePayload(intensity = 2.0f, duration = 15)
                     )
                 }
-            }
-
-            // Во время управляемого полёта столкновения не должны
-            // вызывать преждевременный взрыв.
-            if (!skyfallFlightActive &&
-                !skyfallImpactPending &&
-                (onGround() || horizontalCollision || verticalCollision)
-            ) {
-                onGiantImpact()
             }
         }
     }
 
+    private fun explodeIntoFragments() {
+        if (level().isClientSide) return
+
+        val serverLevel = level() as ServerLevel
+        val pos = position()
+
+        serverLevel.explode(
+            this,
+            pos.x, pos.y, pos.z,
+            8.0f,
+            Level.ExplosionInteraction.NONE
+        )
+
+        serverLevel.playSound(
+            null,
+            blockPosition(),
+            SoundEvents.GENERIC_EXPLODE.value(),
+            SoundSource.HOSTILE,
+            15.0f,
+            0.3f
+        )
+
+        serverLevel.playSound(
+            null,
+            blockPosition(),
+            SoundEvents.LIGHTNING_BOLT_THUNDER,
+            SoundSource.WEATHER,
+            12.0f,
+            0.4f
+        )
+
+        val fragmentCount = 20
+        for (i in 0 until fragmentCount) {
+            val vx = (random.nextDouble() - 0.5) * 2.2
+            val vy = -1.2 - random.nextDouble() * 0.9
+            val vz = (random.nextDouble() - 0.5) * 2.2
+
+            val isDecorative = random.nextBoolean()
+            val fragmentType = if (isDecorative) MeteorType.DECORATIVE_FRAGMENT else MeteorType.FRAGMENT
+
+            val fragment = MeteorEntity(
+                level = serverLevel,
+                x = pos.x + (random.nextDouble() - 0.5) * 6.0,
+                y = pos.y + (random.nextDouble() - 0.5) * 2.0,
+                z = pos.z + (random.nextDouble() - 0.5) * 6.0,
+                velocity = Vec3(vx, vy, vz),
+                type = fragmentType,
+                power = 3
+            )
+            serverLevel.addFreshEntity(fragment)
+        }
+
+        for (player in serverLevel.players()) {
+            PacketDistributor.sendToPlayer(
+                player,
+                SyncScreenShakePayload(intensity = 6.0f, duration = 35)
+            )
+        }
+
+        discard()
+    }
+
     // ------------------------------------------------------------
-    // ЧАСТИЦЫ
+    // ЧАСТИЦЫ И ШЛЕЙФ
     // ------------------------------------------------------------
 
     private fun spawnTrailParticles() {
@@ -407,39 +395,31 @@ class MeteorEntity : Entity {
             val oy = (random.nextDouble() - 0.5) * 1.5
             val oz = (random.nextDouble() - 0.5) * 1.5
 
-            level().addParticle(
-                ParticleTypes.FLAME,
-                pos.x + ox, pos.y + oy, pos.z + oz,
-                0.0, 0.05, 0.0
-            )
-
-            level().addParticle(
-                ParticleTypes.CAMPFIRE_COSY_SMOKE,
-                pos.x + ox, pos.y + oy, pos.z + oz,
-                0.0, 0.1, 0.0
-            )
+            level().addParticle(ParticleTypes.FLAME, pos.x + ox, pos.y + oy, pos.z + oz, 0.0, 0.05, 0.0)
+            level().addParticle(ParticleTypes.CAMPFIRE_COSY_SMOKE, pos.x + ox, pos.y + oy, pos.z + oz, 0.0, 0.1, 0.0)
         }
     }
 
     private fun spawnGiantTrailParticles() {
         val pos = position()
+        val velocity = deltaMovement
+        val speed = velocity.length()
 
-        repeat(25) {
-            val ox = (random.nextDouble() - 0.5) * 8.0
-            val oy = (random.nextDouble() - 0.5) * 8.0
-            val oz = (random.nextDouble() - 0.5) * 8.0
+        val dir = if (speed > 0.001) velocity.normalize() else Vec3(0.0, -1.0, 0.0)
 
-            level().addParticle(
-                ParticleTypes.EXPLOSION,
-                pos.x + ox, pos.y + oy, pos.z + oz,
-                0.0, 0.0, 0.0
-            )
+        val trailSteps = 50
+        for (i in 0..trailSteps) {
+            val backOffset = i * 1.5
+            val px = pos.x - dir.x * backOffset + (random.nextDouble() - 0.5) * 4.0
+            val py = pos.y - dir.y * backOffset + (random.nextDouble() - 0.5) * 4.0
+            val pz = pos.z - dir.z * backOffset + (random.nextDouble() - 0.5) * 4.0
 
-            level().addParticle(
-                ParticleTypes.LAVA,
-                pos.x + ox, pos.y + oy, pos.z + oz,
-                0.0, 0.0, 0.0
-            )
+            level().addParticle(ParticleTypes.FLAME, true, px, py, pz, 0.0, 0.0, 0.0)
+
+            if (i % 2 == 0) {
+                level().addParticle(ParticleTypes.CAMPFIRE_SIGNAL_SMOKE, true, px, py, pz, 0.0, 0.05, 0.0)
+                level().addParticle(ParticleTypes.LAVA, true, px, py, pz, 0.0, 0.0, 0.0)
+            }
         }
     }
 
@@ -451,22 +431,12 @@ class MeteorEntity : Entity {
         val serverLevel = level() as? ServerLevel ?: return
 
         WorldParticleBuilder.create(LodestoneParticleTypes.WISP_PARTICLE)
-            .setColorData(
-                ColorParticleData.create(startColor, endColor).build()
-            )
-            .setScaleData(
-                GenericParticleData.create(scale, 0f).build()
-            )
-            .setTransparencyData(
-                GenericParticleData.create(0.85f, 0f).build()
-            )
+            .setColorData(ColorParticleData.create(startColor, endColor).build())
+            .setScaleData(GenericParticleData.create(scale, 0f).build())
+            .setTransparencyData(GenericParticleData.create(0.85f, 0f).build())
             .setLifetime(25)
             .spawn(serverLevel, x, y, z)
     }
-
-    // ------------------------------------------------------------
-    // СТОЛКНОВЕНИЕ ОБЫЧНОГО МЕТЕОРИТА И ОСКОЛКА
-    // ------------------------------------------------------------
 
     private fun onImpact() {
         if (level().isClientSide) return
@@ -481,16 +451,11 @@ class MeteorEntity : Entity {
         )
 
         var centerGround = blockPosition()
-
-        while (
-            serverLevel.isEmptyBlock(centerGround) &&
-            centerGround.y > serverLevel.minBuildHeight
-        ) {
+        while (serverLevel.isEmptyBlock(centerGround) && centerGround.y > serverLevel.minBuildHeight) {
             centerGround = centerGround.below()
         }
 
         val radius = 2
-
         for (xo in -radius..radius) {
             for (yo in -radius..radius) {
                 for (zo in -radius..radius) {
@@ -504,126 +469,22 @@ class MeteorEntity : Entity {
             }
         }
 
-        serverLevel.playSound(
-            null,
-            centerGround,
-            ModSounds.METEOR_IMPACT.get(),
-            SoundSource.BLOCKS,
-            5.0f,
-            0.9f
-        )
-
-        serverLevel.playSound(
-            null,
-            centerGround,
-            SoundEvents.LIGHTNING_BOLT_THUNDER,
-            SoundSource.WEATHER,
-            4.0f,
-            0.7f
-        )
+        serverLevel.playSound(null, centerGround, ModSounds.METEOR_IMPACT.get(), SoundSource.BLOCKS, 5.0f, 0.9f)
+        serverLevel.playSound(null, centerGround, SoundEvents.LIGHTNING_BOLT_THUNDER, SoundSource.WEATHER, 4.0f, 0.7f)
 
         for (player in serverLevel.players()) {
             val distanceSquared = player.distanceToSqr(this)
-
             if (distanceSquared < 120.0 * 120.0) {
-                val factor = (
-                        1.0 - (sqrt(distanceSquared) / 120.0)
-                        ).toFloat().coerceIn(0.1f, 1.0f)
-
+                val factor = (1.0 - (sqrt(distanceSquared) / 120.0)).toFloat().coerceIn(0.1f, 1.0f)
                 PacketDistributor.sendToPlayer(
                     player,
-                    SyncScreenShakePayload(
-                        intensity = 4.5f * factor,
-                        duration = 25
-                    )
+                    SyncScreenShakePayload(intensity = 4.5f * factor, duration = 25)
                 )
             }
         }
 
         discard()
     }
-
-    // ------------------------------------------------------------
-    // СТОЛКНОВЕНИЕ ГИГАНТСКОГО МЕТЕОРИТА
-    // ------------------------------------------------------------
-
-    private fun onGiantImpact() {
-        if (level().isClientSide) return
-
-        val serverLevel = level() as ServerLevel
-
-        serverLevel.explode(
-            this,
-            x, y, z,
-            explosionPower * 3.0f,
-            Level.ExplosionInteraction.BLOCK
-        )
-
-        var centerGround = blockPosition()
-
-        while (
-            serverLevel.isEmptyBlock(centerGround) &&
-            centerGround.y > serverLevel.minBuildHeight
-        ) {
-            centerGround = centerGround.below()
-        }
-
-        val radius = 7
-
-        for (xo in -radius..radius) {
-            for (yo in -radius..radius) {
-                for (zo in -radius..radius) {
-                    if (xo * xo + yo * yo + zo * zo <= radius * radius) {
-                        serverLevel.setBlockAndUpdate(
-                            centerGround.offset(xo, yo, zo),
-                            Blocks.MAGMA_BLOCK.defaultBlockState()
-                        )
-                    }
-                }
-            }
-        }
-
-        serverLevel.playSound(
-            null,
-            centerGround,
-            SoundEvents.GENERIC_EXPLODE.value(),
-            SoundSource.BLOCKS,
-            12.0f,
-            0.3f
-        )
-
-        serverLevel.playSound(
-            null,
-            centerGround,
-            SoundEvents.LIGHTNING_BOLT_THUNDER,
-            SoundSource.WEATHER,
-            10.0f,
-            0.3f
-        )
-
-        for (player in serverLevel.players()) {
-            PacketDistributor.sendToPlayer(
-                player,
-                SyncScreenShakePayload(
-                    intensity = 12.0f,
-                    duration = 70
-                )
-            )
-        }
-
-        // После основного взрыва запускаем отдельный дождь осколков.
-        serverLevel.players()
-            .minByOrNull { it.distanceToSqr(this) }
-            ?.let { nearestPlayer ->
-                SkyBreakServerManager.spawnMeteorFragmentBurst(serverLevel, nearestPlayer)
-            }
-
-        discard()
-    }
-
-    // ------------------------------------------------------------
-    // ПРОРИСОВКА И СОХРАНЕНИЕ
-    // ------------------------------------------------------------
 
     override fun getBoundingBoxForCulling(): AABB {
         return if (meteorType == MeteorType.GIANT) {
@@ -639,9 +500,7 @@ class MeteorEntity : Entity {
 
     override fun readAdditionalSaveData(compound: CompoundTag) {
         explosionPower = compound.getInt("ExplosionPower")
-        meteorType = MeteorType.entries[
-            compound.getInt("MeteorType").coerceIn(0, 4)
-        ]
+        meteorType = MeteorType.entries[compound.getInt("MeteorType").coerceIn(0, 4)]
     }
 
     override fun addAdditionalSaveData(compound: CompoundTag) {
@@ -651,9 +510,24 @@ class MeteorEntity : Entity {
 
     companion object {
         private val TYPE_ACCESSOR: EntityDataAccessor<Byte> =
-            SynchedEntityData.defineId(
-                MeteorEntity::class.java,
-                EntityDataSerializers.BYTE
-            )
+            SynchedEntityData.defineId(MeteorEntity::class.java, EntityDataSerializers.BYTE)
+
+        private val IS_SKYFALL: EntityDataAccessor<Boolean> =
+            SynchedEntityData.defineId(MeteorEntity::class.java, EntityDataSerializers.BOOLEAN)
+
+        private val TARGET_X: EntityDataAccessor<Float> =
+            SynchedEntityData.defineId(MeteorEntity::class.java, EntityDataSerializers.FLOAT)
+
+        private val TARGET_Y: EntityDataAccessor<Float> =
+            SynchedEntityData.defineId(MeteorEntity::class.java, EntityDataSerializers.FLOAT)
+
+        private val TARGET_Z: EntityDataAccessor<Float> =
+            SynchedEntityData.defineId(MeteorEntity::class.java, EntityDataSerializers.FLOAT)
+
+        private val FLIGHT_DURATION: EntityDataAccessor<Int> =
+            SynchedEntityData.defineId(MeteorEntity::class.java, EntityDataSerializers.INT)
+
+        private val CURRENT_FLIGHT_TICKS: EntityDataAccessor<Int> =
+            SynchedEntityData.defineId(MeteorEntity::class.java, EntityDataSerializers.INT)
     }
 }

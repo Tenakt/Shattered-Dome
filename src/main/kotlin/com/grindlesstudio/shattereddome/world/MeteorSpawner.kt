@@ -89,4 +89,38 @@ object MeteorSpawner {
             spawnMeteorNearPlayer(level, player)
         }
     }
+
+    /**
+     * Запускает гигантский сюжетный метеорит из точки вспышки (skyRiftPos)
+     * по направлению к игроку с детонацией на высоте Y = 375.
+     *
+     * @param level Серверный мир
+     * @param targetPlayer Игрок-цель
+     * @param skyRiftPos Координаты вспышки/разлома на небе (например, Y = 700..900)
+     * @param flightTicks Время полёта в тиках до точки взрыва (например, 60 тиков = 3 секунды)
+     */
+    fun spawnGiantSkyfallMeteor(
+        level: ServerLevel,
+        targetPlayer: ServerPlayer,
+        skyRiftPos: Vec3,
+        flightTicks: Int = 60
+    ) {
+        // Точка назначения на высоте Y = 375 над игроком
+        val targetPosAt375 = Vec3(targetPlayer.x, 375.0, targetPlayer.z)
+
+        val giantMeteor = MeteorEntity(
+            level = level,
+            x = skyRiftPos.x,
+            y = skyRiftPos.y,
+            z = skyRiftPos.z,
+            velocity = Vec3.ZERO,
+            type = MeteorEntity.MeteorType.GIANT,
+            power = 10
+        )
+
+        // Настраиваем вектор полёта от точки вспышки к Y = 375 над игроком
+        giantMeteor.configureSkyfallFlight(targetPosAt375, durationTicks = flightTicks)
+
+        level.addFreshEntity(giantMeteor)
+    }
 }
