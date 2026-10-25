@@ -1,12 +1,12 @@
 package com.grindlesstudio.shattereddome.client.renderer
 
+import com.grindlesstudio.shattereddome.client.DomeBorderClientState
 import net.minecraft.client.Minecraft
-import net.minecraft.client.gui.GuiGraphics
 import net.neoforged.api.distmarker.Dist
-import net.neoforged.neoforge.client.event.RenderGuiEvent
 import net.neoforged.bus.api.SubscribeEvent
 import net.neoforged.fml.common.EventBusSubscriber
-import kotlin.math.sqrt
+import net.neoforged.neoforge.client.event.RenderGuiEvent
+import kotlin.math.abs
 
 @EventBusSubscriber(
     modid = "shattereddome",
@@ -15,11 +15,7 @@ import kotlin.math.sqrt
 )
 object DomeBoundaryRenderer {
 
-    // На каком расстоянии начинается затемнение
-    private const val DARKEN_START = 9000.0
-
-    // На каком расстоянии экран становится полностью чёрным
-    private const val DEATH_DISTANCE = 10000.0
+    private const val DARKEN_START_RATIO = 0.90
 
     @SubscribeEvent
     @JvmStatic
@@ -27,38 +23,32 @@ object DomeBoundaryRenderer {
         val minecraft = Minecraft.getInstance()
         val player = minecraft.player ?: return
 
-        // Расстояние от центра мира (0, 0)
-        val distance = sqrt(
-            player.x * player.x +
-                    player.z * player.z
-        )
+        val radius = DomeBorderClientState.radius
+            .coerceAtLeast(1)
+            .toDouble()
 
-        // До 9000 блоков ничего не делаем
-        if (distance <= DARKEN_START) return
+        // Квадратная граница: проверяем X и Z независимо.
+        val distanceToEdge = maxOf(abs(player.x), abs(player.z))
+        val darkenStart = radius * DARKEN_START_RATIO
 
-        // От 9000 до 10000 превращаем 0..1
+        if (distanceToEdge <= darkenStart) return
+
+        val range = radius - darkenStart
+        if (range <= 0.0) return
+
         val progress = (
-                (distance - DARKEN_START) /
-                        (DEATH_DISTANCE - DARKEN_START)
+                (distanceToEdge - darkenStart) / range
                 ).coerceIn(0.0, 1.0)
 
-        // Небольшое ускорение затемнения в конце
         val alpha = (progress * progress * 255.0).toInt()
-
         if (alpha <= 0) return
 
-        val gui = event.guiGraphics
-
-        // ARGB:
-        // alpha + чёрный цвет
-        val color = (alpha shl 24)
-
-        gui.fill(
+        event.guiGraphics.fill(
             0,
             0,
             minecraft.window.guiScaledWidth,
             minecraft.window.guiScaledHeight,
-            color
+            alpha shl 24
         )
     }
 }

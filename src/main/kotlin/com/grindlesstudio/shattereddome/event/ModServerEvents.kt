@@ -1,8 +1,9 @@
 package com.grindlesstudio.shattereddome.event
 
 import com.grindlesstudio.shattereddome.ShatteredDome
-import com.grindlesstudio.shattereddome.network.SyncSkyBreakPayload
 import com.grindlesstudio.shattereddome.SkyBreakServerManager
+import com.grindlesstudio.shattereddome.network.SyncDomeBorderPayload
+import com.grindlesstudio.shattereddome.network.SyncSkyBreakPayload
 import com.grindlesstudio.shattereddome.world.DomeWorldData
 import net.minecraft.server.level.ServerPlayer
 import net.neoforged.bus.api.SubscribeEvent
@@ -11,19 +12,29 @@ import net.neoforged.neoforge.event.entity.player.PlayerEvent
 import net.neoforged.neoforge.event.tick.PlayerTickEvent
 import net.neoforged.neoforge.network.PacketDistributor
 
-@EventBusSubscriber(modid = ShatteredDome.MOD_ID, bus = EventBusSubscriber.Bus.GAME)
+@EventBusSubscriber(
+    modid = ShatteredDome.MOD_ID,
+    bus = EventBusSubscriber.Bus.GAME
+)
 object ModServerEvents {
 
     @SubscribeEvent
     @JvmStatic
     fun onPlayerLoggedIn(event: PlayerEvent.PlayerLoggedInEvent) {
         val player = event.entity as? ServerPlayer ?: return
-        val level = player.serverLevel()
-        val data = DomeWorldData.get(level)
+        val data = DomeWorldData.get(player.serverLevel())
 
         PacketDistributor.sendToPlayer(
             player,
-            SyncSkyBreakPayload(data.isSkyBroken, SkyBreakServerManager.riftProgress)
+            SyncSkyBreakPayload(
+                data.isSkyBroken,
+                SkyBreakServerManager.riftProgress
+            )
+        )
+
+        PacketDistributor.sendToPlayer(
+            player,
+            SyncDomeBorderPayload(data.borderRadius)
         )
     }
 
@@ -31,12 +42,16 @@ object ModServerEvents {
     @JvmStatic
     fun onPlayerTick(event: PlayerTickEvent.Post) {
         val player = event.entity as? ServerPlayer ?: return
+        val data = DomeWorldData.get(player.serverLevel())
 
-        // Расстояние от центра мира (0, 0)
-        val distanceSquared = player.x * player.x + player.z * player.z
-        val deathDistance = 10000.0
+        val radius = data.borderRadius.coerceAtLeast(1).toDouble()
 
-        if (distanceSquared >= deathDistance * deathDistance) {
+        if (
+            player.x > radius ||
+            player.x < -radius ||
+            player.z > radius ||
+            player.z < -radius
+        ) {
             player.kill()
         }
     }

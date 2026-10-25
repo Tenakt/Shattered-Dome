@@ -6,12 +6,16 @@ import net.minecraft.server.level.ServerLevel
 import net.minecraft.world.level.saveddata.SavedData
 
 class DomeWorldData : SavedData() {
-    var borderRadius: Int = 100
+
+    var borderRadius: Int = 10000
     var isSkyBroken: Boolean = false
     var isStarfallActive: Boolean = false
     var meteorExplosionPower: Float = 3.0f
 
-    override fun save(tag: CompoundTag, registries: HolderLookup.Provider): CompoundTag {
+    override fun save(
+        tag: CompoundTag,
+        registries: HolderLookup.Provider
+    ): CompoundTag {
         tag.putInt("BorderRadius", borderRadius)
         tag.putBoolean("IsSkyBroken", isSkyBroken)
         tag.putBoolean("IsStarfallActive", isStarfallActive)
@@ -20,12 +24,28 @@ class DomeWorldData : SavedData() {
     }
 
     companion object {
-        fun load(tag: CompoundTag, registries: HolderLookup.Provider): DomeWorldData {
+
+        fun load(
+            tag: CompoundTag,
+            registries: HolderLookup.Provider
+        ): DomeWorldData {
             val data = DomeWorldData()
-            data.borderRadius = if (tag.contains("BorderRadius")) tag.getInt("BorderRadius") else 100
+
+            data.borderRadius = if (tag.contains("BorderRadius")) {
+                tag.getInt("BorderRadius")
+            } else {
+                10000
+            }
+
             data.isSkyBroken = tag.getBoolean("IsSkyBroken")
             data.isStarfallActive = tag.getBoolean("IsStarfallActive")
-            data.meteorExplosionPower = if (tag.contains("MeteorExplosionPower")) tag.getFloat("MeteorExplosionPower") else 3.0f
+
+            data.meteorExplosionPower = if (tag.contains("MeteorExplosionPower")) {
+                tag.getFloat("MeteorExplosionPower")
+            } else {
+                3.0f
+            }
+
             return data
         }
 
