@@ -1,4 +1,3 @@
-
 package com.grindlesstudio.shattereddome.client
 
 import com.grindlesstudio.shattereddome.ShatteredDome
@@ -11,6 +10,7 @@ import net.minecraft.client.resources.sounds.AbstractTickableSoundInstance
 import net.minecraft.client.resources.sounds.SoundInstance
 import net.minecraft.sounds.SoundSource
 import net.minecraft.world.level.material.FogType
+import net.minecraft.world.phys.Vec3
 import net.neoforged.api.distmarker.Dist
 import net.neoforged.bus.api.SubscribeEvent
 import net.neoforged.fml.common.EventBusSubscriber
@@ -22,6 +22,10 @@ object SkyBreakClientState {
     var isBroken: Boolean = false
     var riftProgress: Float = 0f
     var skyFlashIntensity: Float = 0f
+
+    var finaleFlashActive: Boolean = false
+    var finaleFlashSource: Vec3? = null
+    var finaleFlashTarget: Vec3? = null
 }
 
 class SkyBreakSirenSound : AbstractTickableSoundInstance(
@@ -66,9 +70,9 @@ object SkyBreakClientHandler {
         if (!SkyBreakClientState.isBroken) return
         if (event.camera.fluidInCamera != FogType.NONE) return
 
-        event.red = FOG_R
-        event.green = FOG_G
-        event.blue = FOG_B
+        event.red *= FOG_R
+        event.green *= FOG_G
+        event.blue *= FOG_B
     }
 
     @SubscribeEvent
@@ -100,14 +104,15 @@ object SkyBreakClientHandler {
         RenderSystem.disableCull()
         RenderSystem.depthMask(false)
 
-        SkyRiftRenderer.render(event)
-
-        RenderSystem.depthMask(true)
-        RenderSystem.enableCull()
-        RenderSystem.enableDepthTest()
-        RenderSystem.disableBlend()
-
-        poseStack.popPose()
+        try {
+            SkyRiftRenderer.render(event)
+        } finally {
+            RenderSystem.depthMask(true)
+            RenderSystem.enableCull()
+            RenderSystem.enableDepthTest()
+            RenderSystem.disableBlend()
+            poseStack.popPose()
+        }
     }
 
     @SubscribeEvent
@@ -115,7 +120,6 @@ object SkyBreakClientHandler {
     fun onClientTick(event: ClientTickEvent.Post) {
         val mc = Minecraft.getInstance()
 
-        // Обновляем анимацию всегда, чтобы она сбрасывалась после остановки.
         SkyRiftRenderer.tickMeteor()
 
         if (SkyBreakClientState.isBroken) {

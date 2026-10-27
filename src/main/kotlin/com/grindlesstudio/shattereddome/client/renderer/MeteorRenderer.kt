@@ -19,30 +19,28 @@ class MeteorRenderer(
 ) : EntityRenderer<MeteorEntity>(context) {
 
     companion object {
-        // Текстура по умолчанию для обычных метеоритов
         private val DEFAULT_TEXTURE = ResourceLocation.fromNamespaceAndPath(
             ShatteredDome.MOD_ID,
             "textures/entity/meteor.png"
         )
 
-        // Отдельная текстура для падающей звезды
         private val STAR_TEXTURE = ResourceLocation.fromNamespaceAndPath(
             ShatteredDome.MOD_ID,
             "textures/entity/star.png"
         )
+
+        private const val STAR_SIZE = 2.5f
     }
 
     init {
         shadowRadius = 1.0f
     }
 
-    /**
-     * Выбирает нужный файл текстуры в зависимости от типа метеорита
-     */
     override fun getTextureLocation(entity: MeteorEntity): ResourceLocation {
-        return when (entity.meteorType) {
-            MeteorEntity.MeteorType.STAR -> STAR_TEXTURE
-            else -> DEFAULT_TEXTURE
+        return if (entity.meteorType == MeteorEntity.MeteorType.STAR) {
+            STAR_TEXTURE
+        } else {
+            DEFAULT_TEXTURE
         }
     }
 
@@ -54,10 +52,41 @@ class MeteorRenderer(
         buffer: MultiBufferSource,
         packedLight: Int
     ) {
+        // Падающая звезда — плоская текстурированная картинка, а не куб.
+        // Каждый клиент ориентирует её относительно собственной камеры.
+        if (entity.meteorType == MeteorEntity.MeteorType.STAR) {
+            poseStack.pushPose()
+            poseStack.mulPose(this.entityRenderDispatcher.cameraOrientation())
+            poseStack.scale(STAR_SIZE, STAR_SIZE, 1.0f)
+
+            val starBuffer = buffer.getBuffer(
+                RenderType.entityCutoutNoCull(STAR_TEXTURE)
+            )
+
+            renderStarBillboard(
+                poseStack.last().pose(),
+                starBuffer,
+                LightTexture.FULL_BRIGHT
+            )
+
+            poseStack.popPose()
+
+            super.render(
+                entity,
+                entityYaw,
+                partialTicks,
+                poseStack,
+                buffer,
+                packedLight
+            )
+            return
+        }
+
         poseStack.pushPose()
 
         when (entity.meteorType) {
             MeteorEntity.MeteorType.GIANT -> {
+                // Размер сюжетного метеорита оставляем без изменений.
                 poseStack.scale(180.0f, 180.0f, 180.0f)
             }
 
@@ -66,17 +95,14 @@ class MeteorRenderer(
                 poseStack.scale(1.4f, 1.4f, 1.4f)
             }
 
-            MeteorEntity.MeteorType.STAR -> {
-                // Вытянутая форма падающей звезды
-                poseStack.scale(0.35f, 0.35f, 2.5f)
-            }
-
             MeteorEntity.MeteorType.NORMAL -> {
                 poseStack.scale(2.5f, 2.5f, 2.5f)
             }
+
+            MeteorEntity.MeteorType.STAR -> Unit
         }
 
-        // Вращение модели во время полёта
+        // Обычные метеориты и осколки вращаются, сюжетный — нет.
         if (entity.meteorType != MeteorEntity.MeteorType.GIANT) {
             val rotation = (entity.tickCount + partialTicks) * 10.0f
             poseStack.mulPose(Axis.XP.rotationDegrees(rotation))
@@ -85,20 +111,11 @@ class MeteorRenderer(
 
         poseStack.translate(-0.5, -0.5, -0.5)
 
-        // Звезда подсвечивается на полную яркость даже ночью
-        val renderLight = if (entity.meteorType == MeteorEntity.MeteorType.STAR) {
-            LightTexture.FULL_BRIGHT
-        } else {
-            packedLight
-        }
-
-        // getTextureLocation(entity) автоматически подставит нужную текстуру
         val builder = buffer.getBuffer(
             RenderType.entityCutoutNoCull(getTextureLocation(entity))
         )
 
-        renderCube(poseStack, builder, renderLight)
-
+        renderCube(poseStack, builder, packedLight)
         poseStack.popPose()
 
         super.render(
@@ -109,6 +126,19 @@ class MeteorRenderer(
             buffer,
             packedLight
         )
+    }
+
+    private fun renderStarBillboard(
+        matrix: Matrix4f,
+        builder: VertexConsumer,
+        packedLight: Int
+    ) {
+        // Квадрат расположен в центре сущности, UV занимают всю текстуру.
+        // NoCull разрешает видеть изображение с обеих сторон.
+        vertex(matrix, builder, -0.5f, -0.5f, 0f, 0f, 1f, 0f, 0f, 1f, packedLight)
+        vertex(matrix, builder,  0.5f, -0.5f, 0f, 1f, 1f, 0f, 0f, 1f, packedLight)
+        vertex(matrix, builder,  0.5f,  0.5f, 0f, 1f, 0f, 0f, 0f, 1f, packedLight)
+        vertex(matrix, builder, -0.5f,  0.5f, 0f, 0f, 0f, 0f, 0f, 1f, packedLight)
     }
 
     private fun renderCube(

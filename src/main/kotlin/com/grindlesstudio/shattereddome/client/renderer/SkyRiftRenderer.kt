@@ -1,10 +1,10 @@
-
 package com.grindlesstudio.shattereddome.client.renderer
 
 import com.grindlesstudio.shattereddome.client.SkyBreakClientState
 import com.grindlesstudio.shattereddome.client.fx.ScreenShakeHandler
 import com.mojang.blaze3d.platform.GlStateManager
 import com.mojang.blaze3d.systems.RenderSystem
+import com.mojang.blaze3d.vertex.BufferBuilder
 import com.mojang.blaze3d.vertex.BufferUploader
 import com.mojang.blaze3d.vertex.DefaultVertexFormat
 import com.mojang.blaze3d.vertex.Tesselator
@@ -23,15 +23,22 @@ import java.awt.Color
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.random.Random
 
 object SkyRiftRenderer {
+
+    private const val RIFT_CURVE_SUBDIVISIONS = 3
+    private const val RIFT_DISK_SEGMENTS = 6
+    private const val MIN_RIFT_RENDER_PROGRESS = 0.20f
 
     private data class FogCluster(
         val direction: Vec3,
         val points: Array<Vec3>,
         val growthThreshold: Float,
-        val scaleMultiplier: Float
+        val scaleMultiplier: Float,
+        // Сглаженные линии создаются один раз при инициализации, не каждый кадр.
+        val renderPoints: List<Vec3>
     )
 
     private val FOG_CLUSTERS: Array<FogCluster> = generateSkyRifts()
@@ -48,24 +55,33 @@ object SkyRiftRenderer {
             Vec3(0.5, 8.0, 0.0)
         )
 
-        clusters.add(FogCluster(firstDir, firstPoints, 0.0f, 1.0f))
+        clusters.add(
+            FogCluster(
+                firstDir,
+                firstPoints,
+                0.0f,
+                1.0f,
+                interpolateCurve(firstPoints, RIFT_CURVE_SUBDIVISIONS)
+            )
+        )
 
         val totalClusters = 50
 
         for (i in 0 until totalClusters) {
             val azimuth = random.nextDouble() * Math.PI * 2.0
             val y = 0.1 + random.nextDouble() * 0.88
-            val r = Math.sqrt(1.0 - y * y)
+            val r = kotlin.math.sqrt(1.0 - y * y)
 
-            val dirX = r * Math.cos(azimuth)
-            val dirY = y
-            val dirZ = r * Math.sin(azimuth)
-            val direction = Vec3(dirX, dirY, dirZ).normalize()
+            val direction = Vec3(
+                r * kotlin.math.cos(azimuth),
+                y,
+                r * kotlin.math.sin(azimuth)
+            ).normalize()
 
             val pointCount = 3 + random.nextInt(3)
             val points = mutableListOf<Vec3>()
-
             val branchAngle = random.nextDouble() * Math.PI * 2.0
+
             var curX = 0.0
             var curY = -4.0 + random.nextDouble() * 2.0
             val stepLen = 3.0 + random.nextDouble() * 3.0
@@ -75,25 +91,25 @@ object SkyRiftRenderer {
                 val dy = stepLen + (random.nextDouble() - 0.5) * 2.0
 
                 val rotX =
-                    curX * Math.cos(branchAngle) - curY * Math.sin(branchAngle)
+                    curX * kotlin.math.cos(branchAngle) -
+                            curY * kotlin.math.sin(branchAngle)
                 val rotY =
-                    curX * Math.sin(branchAngle) + curY * Math.cos(branchAngle)
+                    curX * kotlin.math.sin(branchAngle) +
+                            curY * kotlin.math.cos(branchAngle)
 
                 points.add(Vec3(rotX, rotY, 0.0))
-
                 curX += dx
                 curY += dy
             }
 
-            val threshold = 0.08f + (i.toFloat() / totalClusters) * 0.84f
-            val scaleMult = 0.5f + random.nextFloat() * 0.5f
-
+            val pointArray = points.toTypedArray()
             clusters.add(
                 FogCluster(
                     direction,
-                    points.toTypedArray(),
-                    threshold,
-                    scaleMult
+                    pointArray,
+                    0.08f + (i.toFloat() / totalClusters) * 0.84f,
+                    0.5f + random.nextFloat() * 0.5f,
+                    interpolateCurve(pointArray, RIFT_CURVE_SUBDIVISIONS)
                 )
             )
         }
@@ -102,70 +118,101 @@ object SkyRiftRenderer {
     }
 
     private var animTime = 0f
-
-    // Прогресс приближения небесного метеорита.
-    private var meteorProgress = 0f
+    private var finaleTick = -1
+    private var finaleStarted = false
     private var wasBroken = false
 
-    // 2400 клиентских тиков = примерно 120 секунд.
-    private const val METEOR_DURATION = 2400f
+    private const val FLASH_DURATION = 500
+    private const val METEOR_DURATION = 60
+    private const val FINALE_DURATION = FLASH_DURATION + METEOR_DURATION
     private const val METEOR_SHAKE_MAX = 1.8f
 
     /**
-     * Обновляется каждый клиентский тик.
-     * При старте разлома метеорит появляется вдали.
-     * При остановке разлома анимация сбрасывается.
+     * 500 тиков — нарастание вспышки и предварительной тряски.
+     * Следующие 60 тиков — полёт сущности и угасание вспышки.
      */
     fun tickMeteor() {
         val active = SkyBreakClientState.isBroken
 
-        if (active && !wasBroken) {
-            meteorProgress = 0f
-        }
-
         if (!active) {
-            meteorProgress = 0f
+            finaleTick = -1
+            finaleStarted = false
             wasBroken = false
+            SkyBreakClientState.skyFlashIntensity = 0f
+            SkyBreakClientState.finaleFlashActive = false
+            SkyBreakClientState.finaleFlashSource = null
+            SkyBreakClientState.finaleFlashTarget = null
             return
         }
 
-        wasBroken = true
-
-        if (meteorProgress >= 1f) return
-
-        meteorProgress =
-            (meteorProgress + 1f / METEOR_DURATION).coerceAtMost(1f)
-
-        // Тряска усиливается по мере приближения.
-        val eased = meteorProgress * meteorProgress
-        val intensity = eased * METEOR_SHAKE_MAX
-
-        if (intensity > 0.01f) {
-            ScreenShakeHandler.addShake(intensity, 2)
+        if (!wasBroken) {
+            finaleTick = -1
+            finaleStarted = false
+            SkyBreakClientState.skyFlashIntensity = 0f
+            wasBroken = true
         }
+
+        if (!finaleStarted && SkyBreakClientState.finaleFlashActive) {
+            finaleStarted = true
+            finaleTick = 0
+        }
+
+        if (!finaleStarted || finaleTick < 0) return
+
+        when {
+            finaleTick < FLASH_DURATION -> {
+                val t = (finaleTick + 1).toFloat() / FLASH_DURATION
+                val eased = t * t * (3f - 2f * t)
+
+                SkyBreakClientState.skyFlashIntensity = eased
+
+                // Тряска начинается раньше, чем метеорит становится видимым.
+                ScreenShakeHandler.addShake(
+                    0.02f + eased * METEOR_SHAKE_MAX,
+                    2
+                )
+            }
+
+            finaleTick < FINALE_DURATION -> {
+                val flightTick = finaleTick - FLASH_DURATION
+                val t = (flightTick + 1).toFloat() / METEOR_DURATION
+
+                SkyBreakClientState.skyFlashIntensity = 0.65f * (1f - t)
+                ScreenShakeHandler.addShake(0.35f + t * 0.85f, 2)
+            }
+
+            else -> {
+                SkyBreakClientState.skyFlashIntensity = 0f
+                finaleStarted = false
+                finaleTick = -1
+                SkyBreakClientState.finaleFlashActive = false
+                SkyBreakClientState.finaleFlashSource = null
+                SkyBreakClientState.finaleFlashTarget = null
+                return
+            }
+        }
+
+        finaleTick++
     }
 
     fun render(event: RenderLevelStageEvent) {
-        val progress = SkyBreakClientState.riftProgress
-        val flash = SkyBreakClientState.skyFlashIntensity
+        if (event.stage != RenderLevelStageEvent.Stage.AFTER_SKY) return
 
-        // Важно: не прекращаем рендеринг, пока летит метеорит,
-        // даже если разлом ещё не начал раскрываться.
+        val progress = SkyBreakClientState.riftProgress.coerceIn(0f, 1f)
+        val flash = SkyBreakClientState.skyFlashIntensity.coerceIn(0f, 1f)
+
         if (
+            !SkyBreakClientState.isBroken &&
             progress <= 0f &&
-            flash <= 0f &&
-            (!SkyBreakClientState.isBroken || meteorProgress >= 1f)
+            flash <= 0f
         ) {
             return
         }
 
-        animTime += 0.012f
+        // В начале прогресса ещё нет видимых точек трещин; пропускаем пустую сборку.
+        if (flash <= 0.001f && progress < MIN_RIFT_RENDER_PROGRESS) return
 
-        if (SkyBreakClientState.skyFlashIntensity > 0f) {
-            SkyBreakClientState.skyFlashIntensity =
-                (SkyBreakClientState.skyFlashIntensity - 0.03f)
-                    .coerceAtLeast(0f)
-        }
+        animTime += 0.012f
 
         val mc = Minecraft.getInstance()
         val renderDistance = mc.options.renderDistance().get() * 16.0
@@ -174,124 +221,61 @@ object SkyRiftRenderer {
 
         RenderSystem.setShader(GameRenderer::getPositionColorShader)
         RenderSystem.enableBlend()
-        RenderSystem.blendFunc(
-            GlStateManager.SourceFactor.SRC_ALPHA,
-            GlStateManager.DestFactor.ONE
+        RenderSystem.disableDepthTest()
+        RenderSystem.depthMask(false)
+
+        val buffer = Tesselator.getInstance().begin(
+            VertexFormat.Mode.TRIANGLES,
+            DefaultVertexFormat.POSITION_COLOR
         )
 
-        // НОВОЕ: рисуем метеорит независимо от прогресса разлома.
-        drawSkyMeteor(matrix, skyDistance)
+        try {
+            RenderSystem.blendFunc(
+                GlStateManager.SourceFactor.SRC_ALPHA,
+                GlStateManager.DestFactor.ONE
+            )
 
-        val flashBoost = 1.0f + flash * 2.5f
+            var hasGeometry = false
 
-        for ((index, cluster) in FOG_CLUSTERS.withIndex()) {
-            if (progress < cluster.growthThreshold && flash <= 0f) continue
-
-            val clusterProgress = if (cluster.growthThreshold == 0.0f) {
-                progress.coerceIn(0f, 1f)
-            } else {
-                ((progress - cluster.growthThreshold) /
-                        (1.0f - cluster.growthThreshold)).coerceIn(0f, 1f)
+            if (flash > 0.001f) {
+                drawFlash(buffer, matrix, skyDistance, flash, event.camera.position)
+                hasGeometry = true
             }
 
-            val center = cluster.direction.scale(skyDistance)
-            val scale = (skyDistance / 100.0).toFloat() *
-                    cluster.scaleMultiplier
-
-            val normal = cluster.direction
-            val ref = if (abs(normal.y) > 0.8) {
-                Vec3(1.0, 0.0, 0.0)
-            } else {
-                Vec3(0.0, 1.0, 0.0)
+            if (progress >= MIN_RIFT_RENDER_PROGRESS) {
+                hasGeometry = drawRift(buffer, matrix, skyDistance, progress) || hasGeometry
             }
 
-            val right = ref.cross(normal).normalize()
-            val up = normal.cross(right).normalize()
-
-            val interpolatedPoints = interpolateCurve(cluster.points, 6)
-            val visibleCount = (interpolatedPoints.size * clusterProgress)
-                .toInt()
-                .coerceAtMost(interpolatedPoints.size)
-
-            val seedOffset = index * 2.31f
-
-            for (i in 0 until visibleCount) {
-                val p = interpolatedPoints[i]
-
-                val waveX =
-                    sin(animTime * 1.5f + i * 0.5f + seedOffset) * 0.8f
-                val waveY =
-                    cos(animTime * 1.2f + i * 0.4f + seedOffset) * 0.6f
-
-                val cx = (p.x * 0.8 + waveX).toFloat()
-                val cy = (p.y + waveY).toFloat()
-
-                val alphaFade = sin(
-                    (i.toFloat() /
-                            (interpolatedPoints.size - 1).coerceAtLeast(1)) *
-                            Math.PI.toFloat()
-                )
-
-                drawRadialFogDisk(
-                    matrix, center, right, up, skyDistance, scale,
-                    cx = cx,
-                    cy = cy,
-                    radius = 5.0f * (1.0f + flash * 0.8f),
-                    r = 0.45f + flash * 0.4f,
-                    g = 0.02f,
-                    b = 0.85f + flash * 0.15f,
-                    alpha = 0.05f * clusterProgress * alphaFade * flashBoost
-                )
-
-                drawRadialFogDisk(
-                    matrix, center, right, up, skyDistance, scale,
-                    cx = cx + sin(animTime + i) * 0.5f,
-                    cy = cy + cos(animTime + i) * 0.5f,
-                    radius = 2.5f * (1.0f + flash * 0.5f),
-                    r = 0.85f,
-                    g = 0.10f + flash * 0.3f,
-                    b = 0.95f,
-                    alpha = 0.12f * clusterProgress * alphaFade * flashBoost
-                )
-
-                drawRadialFogDisk(
-                    matrix, center, right, up, skyDistance, scale,
-                    cx = cx,
-                    cy = cy,
-                    radius = 1.0f,
-                    r = 0.98f,
-                    g = 0.70f,
-                    b = 1.0f,
-                    alpha = 0.30f * clusterProgress * alphaFade * flashBoost
-                )
+            // Критическая оптимизация: все трещины отправляются видеокарте одним draw call.
+            // На первых кадрах роста у трещин ещё могут быть только прозрачные точки;
+            // в таком случае не строим пустой буфер.
+            if (hasGeometry) {
+                BufferUploader.drawWithShader(buffer.buildOrThrow())
             }
+        } finally {
+            RenderSystem.defaultBlendFunc()
+            RenderSystem.depthMask(true)
+            RenderSystem.enableDepthTest()
+            RenderSystem.disableBlend()
         }
-
-        RenderSystem.defaultBlendFunc()
     }
 
-    /**
-     * Рисует метеорит непосредственно на небесной сфере,
-     * а не как сущность возле игрока.
-     */
-    private fun drawSkyMeteor(
+    private fun drawFlash(
+        buffer: BufferBuilder,
         matrix: Matrix4f,
-        skyDistance: Double
+        distance: Double,
+        intensity: Float,
+        cameraPosition: Vec3
     ) {
-        if (!SkyBreakClientState.isBroken || meteorProgress >= 1f) return
+        val source = SkyBreakClientState.finaleFlashSource
 
-        val t = meteorProgress.coerceIn(0f, 1f)
+        val direction = source
+            ?.subtract(cameraPosition)
+            ?.takeIf { it.lengthSqr() > 0.0001 }
+            ?.normalize()
+            ?: Vec3(0.0, 0.94, -0.34).normalize()
 
-        // Вначале метеорит высоко и далеко.
-        // Постепенно опускается ближе к горизонту.
-        val direction = Vec3(
-            0.35 - 0.45 * t,
-            0.48 - 0.38 * t,
-            -0.80
-        ).normalize()
-
-        val center = direction.scale(skyDistance)
-
+        val center = direction.scale(distance)
         val reference = if (abs(direction.y) > 0.8) {
             Vec3(1.0, 0.0, 0.0)
         } else {
@@ -300,64 +284,134 @@ object SkyRiftRenderer {
 
         val right = reference.cross(direction).normalize()
         val up = direction.cross(right).normalize()
+        val scale = (distance / 100.0).toFloat()
+        val pulse = 0.82f + 0.18f * sin(intensity * Math.PI.toFloat())
 
-        val scale = (skyDistance / 100.0).toFloat()
-
-        // Рост ускоряется ближе к финалу.
-        val growth = t * t
-        val radius = 0.35f + growth * 9.0f
-        val glow = (0.25f + growth * 0.75f).coerceAtMost(1f)
-
-        // Длинный красно-оранжевый след позади метеорита.
         drawRadialFogDisk(
-            matrix, center, right, up, skyDistance, scale,
-            cx = 0f,
-            cy = radius * 1.8f,
-            radius = radius * 1.7f,
-            r = 1f,
-            g = 0.10f,
-            b = 0.01f,
-            alpha = 0.22f * glow
+            buffer, matrix, center, right, up, distance, scale,
+            0f, 0f,
+            5.5f + intensity * 15f,
+            0.18f * intensity * pulse,
+            0.40f * intensity,
+            0.96f * intensity,
+            0.45f * intensity,
+            24
         )
 
-        // Внешнее свечение.
         drawRadialFogDisk(
-            matrix, center, right, up, skyDistance, scale,
-            cx = 0f,
-            cy = 0f,
-            radius = radius * 1.6f,
-            r = 1f,
-            g = 0.12f,
-            b = 0.015f,
-            alpha = 0.40f * glow
+            buffer, matrix, center, right, up, distance, scale,
+            0f, 0f,
+            2.5f + intensity * 8f,
+            0.75f * intensity,
+            0.88f * intensity,
+            1f,
+            0.85f * intensity,
+            24
         )
 
-        // Оранжевый огонь.
         drawRadialFogDisk(
-            matrix, center, right, up, skyDistance, scale,
-            cx = 0f,
-            cy = 0f,
-            radius = radius * 0.85f,
-            r = 1f,
-            g = 0.38f,
-            b = 0.04f,
-            alpha = 0.85f * glow
-        )
-
-        // Яркая сердцевина.
-        drawRadialFogDisk(
-            matrix, center, right, up, skyDistance, scale,
-            cx = 0f,
-            cy = 0f,
-            radius = radius * 0.35f,
-            r = 1f,
-            g = 0.85f,
-            b = 0.48f,
-            alpha = glow
+            buffer, matrix, center, right, up, distance, scale,
+            0f, 0f,
+            0.8f + intensity * 5.0f,
+            intensity,
+            intensity,
+            1f,
+            intensity,
+            24
         )
     }
 
+    /** Трещины используют фиксированные цвета и альфу: вспышка не влияет на яркость. */
+    private fun drawRift(
+        buffer: BufferBuilder,
+        matrix: Matrix4f,
+        distance: Double,
+        progress: Float
+    ): Boolean {
+        val amount = progress.coerceIn(0f, 1f)
+        var emittedGeometry = false
+
+        for ((index, cluster) in FOG_CLUSTERS.withIndex()) {
+            if (amount < cluster.growthThreshold) continue
+
+            val clusterProgress = if (cluster.growthThreshold == 0f) {
+                amount
+            } else {
+                ((amount - cluster.growthThreshold) /
+                        (1f - cluster.growthThreshold)).coerceIn(0f, 1f)
+            }
+
+            val center = cluster.direction.scale(distance)
+            val scale = (distance / 100.0).toFloat() * cluster.scaleMultiplier
+            val normal = cluster.direction
+
+            val reference = if (abs(normal.y) > 0.8) {
+                Vec3(1.0, 0.0, 0.0)
+            } else {
+                Vec3(0.0, 1.0, 0.0)
+            }
+
+            val right = reference.cross(normal).normalize()
+            val up = normal.cross(right).normalize()
+            val points = cluster.renderPoints
+            val visibleCount = (points.size * clusterProgress)
+                .toInt()
+                .coerceAtMost(points.size)
+
+            val seedOffset = index * 2.31f
+
+            for (i in 0 until visibleCount) {
+                val point = points[i]
+                val waveX = sin(animTime * 1.5f + i * 0.5f + seedOffset) * 0.8f
+                val waveY = cos(animTime * 1.2f + i * 0.4f + seedOffset) * 0.6f
+
+                val cx = (point.x * 0.8 + waveX).toFloat()
+                val cy = (point.y + waveY).toFloat()
+
+                val alphaFade = sin(
+                    (i.toFloat() / (points.size - 1).coerceAtLeast(1)) *
+                            Math.PI.toFloat()
+                )
+                if (alphaFade <= 0.001f || clusterProgress <= 0f) continue
+                emittedGeometry = true
+
+                drawRadialFogDisk(
+                    buffer, matrix, center, right, up, distance, scale,
+                    cx, cy,
+                    5f,
+                    0.45f,
+                    0.02f,
+                    0.85f,
+                    0.05f * clusterProgress * alphaFade
+                )
+
+                drawRadialFogDisk(
+                    buffer, matrix, center, right, up, distance, scale,
+                    cx + sin(animTime + i) * 0.5f,
+                    cy + cos(animTime + i) * 0.5f,
+                    2.5f,
+                    0.85f,
+                    0.10f,
+                    0.95f,
+                    0.12f * clusterProgress * alphaFade
+                )
+
+                drawRadialFogDisk(
+                    buffer, matrix, center, right, up, distance, scale,
+                    cx, cy,
+                    1f,
+                    0.98f, 0.70f, 1f,
+                    0.30f * clusterProgress * alphaFade
+                )
+            }
+        }
+
+        return emittedGeometry
+    }
+
+    /** Добавляет один радиальный диск в общий буфер; не создаёт и не отправляет отдельный буфер. */
     private fun drawRadialFogDisk(
+        buffer: BufferBuilder,
         matrix: Matrix4f,
         center: Vec3,
         right: Vec3,
@@ -371,14 +425,9 @@ object SkyRiftRenderer {
         g: Float,
         b: Float,
         alpha: Float,
-        segments: Int = 8
+        segments: Int = RIFT_DISK_SEGMENTS
     ) {
         if (alpha <= 0.001f || radius <= 0f) return
-
-        val buffer = Tesselator.getInstance().begin(
-            VertexFormat.Mode.TRIANGLES,
-            DefaultVertexFormat.POSITION_COLOR
-        )
 
         val angleStep = (Math.PI * 2.0 / segments).toFloat()
 
@@ -391,25 +440,9 @@ object SkyRiftRenderer {
             val x2 = cx + cos(a2) * radius
             val y2 = cy + sin(a2) * radius
 
-            vertex(
-                buffer, matrix, center, right, up, skyDistance, scale,
-                cx, cy, r, g, b, alpha
-            )
-
-            vertex(
-                buffer, matrix, center, right, up, skyDistance, scale,
-                x1, y1, r, g, b, 0f
-            )
-
-            vertex(
-                buffer, matrix, center, right, up, skyDistance, scale,
-                x2, y2, r, g, b, 0f
-            )
-        }
-
-        val builtData = buffer.build()
-        if (builtData != null) {
-            BufferUploader.drawWithShader(builtData)
+            vertex(buffer, matrix, center, right, up, skyDistance, scale, cx, cy, r, g, b, alpha)
+            vertex(buffer, matrix, center, right, up, skyDistance, scale, x1, y1, r, g, b, 0f)
+            vertex(buffer, matrix, center, right, up, skyDistance, scale, x2, y2, r, g, b, 0f)
         }
     }
 
@@ -417,7 +450,7 @@ object SkyRiftRenderer {
         points: Array<Vec3>,
         subdivisions: Int
     ): List<Vec3> {
-        val result = mutableListOf<Vec3>()
+        val result = ArrayList<Vec3>((points.size - 1) * subdivisions + 1)
 
         for (i in 0 until points.size - 1) {
             val p0 = points[(i - 1).coerceAtLeast(0)]
@@ -431,14 +464,14 @@ object SkyRiftRenderer {
                 val t3 = t2 * t
 
                 val x = 0.5 * (
-                        (2 * p1.x) +
+                        2 * p1.x +
                                 (-p0.x + p2.x) * t +
                                 (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 +
                                 (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3
                         )
 
                 val y = 0.5 * (
-                        (2 * p1.y) +
+                        2 * p1.y +
                                 (-p0.y + p2.y) * t +
                                 (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 +
                                 (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3
@@ -452,8 +485,9 @@ object SkyRiftRenderer {
         return result
     }
 
+    /** Проецирует вершину на сферу неба без создания временных Vec3 на каждую вершину. */
     private fun vertex(
-        buffer: com.mojang.blaze3d.vertex.BufferBuilder,
+        buffer: BufferBuilder,
         matrix: Matrix4f,
         center: Vec3,
         right: Vec3,
@@ -467,25 +501,33 @@ object SkyRiftRenderer {
         b: Float,
         a: Float
     ) {
-        val flatPos = center
-            .add(right.scale((x * scale).toDouble()))
-            .add(up.scale((y * scale).toDouble()))
+        val offsetX = x.toDouble() * scale
+        val offsetY = y.toDouble() * scale
 
-        val sphericalPos = flatPos.normalize().scale(skyDistance)
+        val flatX = center.x + right.x * offsetX + up.x * offsetY
+        val flatY = center.y + right.y * offsetX + up.y * offsetY
+        val flatZ = center.z + right.z * offsetX + up.z * offsetY
+
+        val lengthSquared = flatX * flatX + flatY * flatY + flatZ * flatZ
+        if (lengthSquared <= 1.0e-12) return
+
+        val projection = skyDistance / sqrt(lengthSquared)
 
         buffer.addVertex(
             matrix,
-            sphericalPos.x.toFloat(),
-            sphericalPos.y.toFloat(),
-            sphericalPos.z.toFloat()
+            (flatX * projection).toFloat(),
+            (flatY * projection).toFloat(),
+            (flatZ * projection).toFloat()
         ).setColor(r, g, b, a)
     }
 
+    /** Исходные Lodestone-частицы около активных разломов. */
     fun tick(mc: Minecraft) {
         val player = mc.player ?: return
         val level = mc.level ?: return
 
-        if (!SkyBreakClientState.isBroken ||
+        if (
+            !SkyBreakClientState.isBroken ||
             SkyBreakClientState.riftProgress <= 0f
         ) {
             return
@@ -498,31 +540,29 @@ object SkyRiftRenderer {
                 return
             }
 
-            val p = cluster.points[Random.nextInt(cluster.points.size)]
-
+            val point = cluster.points[Random.nextInt(cluster.points.size)]
             val distance = 35.0
             val center = player.position().add(cluster.direction.scale(distance))
 
-            val ref = if (abs(cluster.direction.y) > 0.8) {
+            val reference = if (abs(cluster.direction.y) > 0.8) {
                 Vec3(1.0, 0.0, 0.0)
             } else {
                 Vec3(0.0, 1.0, 0.0)
             }
 
-            val right = ref.cross(cluster.direction).normalize()
+            val right = reference.cross(cluster.direction).normalize()
             val up = cluster.direction.cross(right).normalize()
-
             val scale = distance / 100.0
 
             val pos = center
                 .add(
                     right.scale(
-                        p.x * scale + Random.nextDouble(-1.5, 1.5)
+                        point.x * scale + Random.nextDouble(-1.5, 1.5)
                     )
                 )
                 .add(
                     up.scale(
-                        p.y * scale + Random.nextDouble(-1.5, 1.5)
+                        point.y * scale + Random.nextDouble(-1.5, 1.5)
                     )
                 )
 
