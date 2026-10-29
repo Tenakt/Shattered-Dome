@@ -1,6 +1,7 @@
 package com.grindlesstudio.shattereddome.client.renderer
 
 import com.grindlesstudio.shattereddome.client.SkyBreakClientState
+import com.grindlesstudio.shattereddome.network.SkyEventStage
 import com.grindlesstudio.shattereddome.client.fx.ScreenShakeHandler
 import com.mojang.blaze3d.platform.GlStateManager
 import com.mojang.blaze3d.systems.RenderSystem
@@ -30,7 +31,7 @@ object SkyRiftRenderer {
 
     private const val RIFT_CURVE_SUBDIVISIONS = 3
     private const val RIFT_DISK_SEGMENTS = 6
-    private const val MIN_RIFT_RENDER_PROGRESS = 0.20f
+    private const val MIN_RIFT_RENDER_PROGRESS = 0.005f
 
     private data class FogCluster(
         val direction: Vec3,
@@ -42,6 +43,97 @@ object SkyRiftRenderer {
     )
 
     private val FOG_CLUSTERS: Array<FogCluster> = generateSkyRifts()
+
+
+    /** Крупные отверстия в оболочке; форма задаётся отдельно для каждого разлома. */
+    private data class RiftPatch(
+        val direction: Vec3,
+        val growthThreshold: Float,
+        val size: Float,
+        val rotation: Float,
+        val scaleMultiplier: Float,
+        val seed: Int
+    )
+
+    private data class RiftPatchFrame(
+        val patch: RiftPatch,
+        val center: Vec3,
+        val right: Vec3,
+        val up: Vec3,
+        val scale: Float,
+        val growth: Float,
+        val size: Float,
+        val outline: Array<Vec3>
+    )
+
+    // Единая форма всех разломов: вытянутый рваный зигзаг с фиолетовой каймой.
+    // Координаты подобраны по референсу: длинный силуэт и неглубокие зубцы.
+    private val ZIGZAG_SHAPE = arrayOf(
+        Vec3(-1.00, 0.13, 0.0),
+        Vec3(-0.77, 0.34, 0.0),
+        Vec3(-0.55, 0.16, 0.0),
+        Vec3(-0.29, 0.29, 0.0),
+        Vec3(-0.10, 0.08, 0.0),
+        Vec3(0.18, 0.22, 0.0),
+        Vec3(0.40, 0.04, 0.0),
+        Vec3(0.68, 0.11, 0.0),
+        Vec3(1.00, -0.19, 0.0),
+        Vec3(0.74, -0.39, 0.0),
+        Vec3(0.49, -0.20, 0.0),
+        Vec3(0.25, -0.34, 0.0),
+        Vec3(0.02, -0.13, 0.0),
+        Vec3(-0.23, -0.29, 0.0),
+        Vec3(-0.47, -0.07, 0.0),
+        Vec3(-0.73, -0.17, 0.0),
+        Vec3(-1.00, 0.02, 0.0)
+    )
+
+    private val COSMIC_STAR_POSITIONS = arrayOf(
+        Vec3(-0.72, 0.08, 0.0),
+        Vec3(-0.48, 0.10, 0.0),
+        Vec3(-0.22, -0.04, 0.0),
+        Vec3(0.05, 0.00, 0.0),
+        Vec3(0.31, -0.10, 0.0),
+        Vec3(0.56, -0.16, 0.0),
+        Vec3(0.76, -0.25, 0.0)
+    )
+
+    // Все разломы имеют один зигзагообразный силуэт; различаются только положением,
+    // размером и наклоном, чтобы не появлялись круги, овалы и треугольники.
+    // Фиксированный seed делает раскладку случайной на вид, но стабильной между запусками.
+    // Азимут и высота независимы: разломы больше не выстраиваются диагональной цепочкой.
+    private val RIFT_PATCHES: Array<RiftPatch> = generateRiftPatches()
+
+    private fun generateRiftPatches(): Array<RiftPatch> {
+        val random = java.util.Random(0x51A7D0L)
+        val count = 8
+
+        return Array(count) { index ->
+            val azimuth = random.nextDouble() * Math.PI * 2.0
+            val vertical = 0.12 + random.nextDouble() * 0.80
+            val horizontal = sqrt(1.0 - vertical * vertical)
+            val direction = Vec3(
+                horizontal * cos(azimuth),
+                vertical,
+                horizontal * sin(azimuth)
+            ).normalize()
+
+            val growthThreshold = if (index == 0) {
+                0f
+            } else {
+                0.04f + random.nextFloat() * 0.62f
+            }
+
+            RiftPatch(
+                direction = direction,
+                growthThreshold = growthThreshold,
+                size = 24f + random.nextFloat() * 13f,
+                rotation = (random.nextFloat() - 0.5f) * 1.15f,
+                scaleMultiplier = 0.78f + random.nextFloat() * 0.35f,
+                seed = index
+            )
+        }
+    }
 
     private fun generateSkyRifts(): Array<FogCluster> {
         val clusters = mutableListOf<FogCluster>()
@@ -121,6 +213,7 @@ object SkyRiftRenderer {
     private var finaleTick = -1
     private var finaleStarted = false
     private var wasBroken = false
+    private var shardCooldown = 0
 
     private const val FLASH_DURATION = 500
     private const val METEOR_DURATION = 60
@@ -139,6 +232,9 @@ object SkyRiftRenderer {
             finaleStarted = false
             wasBroken = false
             SkyBreakClientState.skyFlashIntensity = 0f
+            SkyBreakClientState.openingFlashIntensity = 0f
+            SkyBreakClientState.openingFlashTicks = 0
+            shardCooldown = 0
             SkyBreakClientState.finaleFlashActive = false
             SkyBreakClientState.finaleFlashSource = null
             SkyBreakClientState.finaleFlashTarget = null
@@ -199,18 +295,17 @@ object SkyRiftRenderer {
         if (event.stage != RenderLevelStageEvent.Stage.AFTER_SKY) return
 
         val progress = SkyBreakClientState.riftProgress.coerceIn(0f, 1f)
-        val flash = SkyBreakClientState.skyFlashIntensity.coerceIn(0f, 1f)
+        val flash = maxOf(
+            SkyBreakClientState.skyFlashIntensity,
+            SkyBreakClientState.openingFlashIntensity
+        ).coerceIn(0f, 1f)
+
+        if (!SkyBreakClientState.isBroken && progress <= 0f && flash <= 0f) return
 
         if (
-            !SkyBreakClientState.isBroken &&
-            progress <= 0f &&
-            flash <= 0f
-        ) {
-            return
-        }
-
-        // В начале прогресса ещё нет видимых точек трещин; пропускаем пустую сборку.
-        if (flash <= 0.001f && progress < MIN_RIFT_RENDER_PROGRESS) return
+            flash <= 0.001f && progress < MIN_RIFT_RENDER_PROGRESS &&
+            SkyBreakClientState.eventStage != SkyEventStage.RESTORING
+        ) return
 
         animTime += 0.012f
 
@@ -218,39 +313,51 @@ object SkyRiftRenderer {
         val renderDistance = mc.options.renderDistance().get() * 16.0
         val skyDistance = (renderDistance * 0.85).coerceAtMost(230.0)
         val matrix = event.poseStack.last().pose()
+        val showRifts = progress >= MIN_RIFT_RENDER_PROGRESS ||
+                (SkyBreakClientState.eventStage == SkyEventStage.RESTORING && progress > 0.001f)
+        val patchFrames = if (showRifts) createPatchFrames(skyDistance, progress) else emptyList()
 
         RenderSystem.setShader(GameRenderer::getPositionColorShader)
         RenderSystem.enableBlend()
         RenderSystem.disableDepthTest()
         RenderSystem.depthMask(false)
 
-        val buffer = Tesselator.getInstance().begin(
-            VertexFormat.Mode.TRIANGLES,
-            DefaultVertexFormat.POSITION_COLOR
-        )
-
         try {
+            // PASS 1: полупрозрачная тёмно-фиолетовая поверхность — это само отверстие в небе.
+            if (patchFrames.isNotEmpty()) {
+                RenderSystem.blendFunc(
+                    GlStateManager.SourceFactor.SRC_ALPHA,
+                    GlStateManager.DestFactor.ONE_MINUS_SRC_ALPHA
+                )
+                val voidBuffer = Tesselator.getInstance().begin(
+                    VertexFormat.Mode.TRIANGLES,
+                    DefaultVertexFormat.POSITION_COLOR
+                )
+                if (drawRiftOpenings(voidBuffer, matrix, skyDistance, patchFrames)) {
+                    BufferUploader.drawWithShader(voidBuffer.buildOrThrow())
+                }
+            }
+
+            // PASS 2: свечение рваных краёв, звёзды, планеты и вспышка.
+            val glowBuffer = Tesselator.getInstance().begin(
+                VertexFormat.Mode.TRIANGLES,
+                DefaultVertexFormat.POSITION_COLOR
+            )
             RenderSystem.blendFunc(
                 GlStateManager.SourceFactor.SRC_ALPHA,
                 GlStateManager.DestFactor.ONE
             )
 
-            var hasGeometry = false
-
+            var hasGlow = false
             if (flash > 0.001f) {
-                drawFlash(buffer, matrix, skyDistance, flash, event.camera.position)
-                hasGeometry = true
+                drawFlash(glowBuffer, matrix, skyDistance, flash, event.camera.position)
+                hasGlow = true
             }
-
-            if (progress >= MIN_RIFT_RENDER_PROGRESS) {
-                hasGeometry = drawRift(buffer, matrix, skyDistance, progress) || hasGeometry
+            if (patchFrames.isNotEmpty()) {
+                hasGlow = drawRift(glowBuffer, matrix, skyDistance, patchFrames) || hasGlow
             }
-
-            // Критическая оптимизация: все трещины отправляются видеокарте одним draw call.
-            // На первых кадрах роста у трещин ещё могут быть только прозрачные точки;
-            // в таком случае не строим пустой буфер.
-            if (hasGeometry) {
-                BufferUploader.drawWithShader(buffer.buildOrThrow())
+            if (hasGlow) {
+                BufferUploader.drawWithShader(glowBuffer.buildOrThrow())
             }
         } finally {
             RenderSystem.defaultBlendFunc()
@@ -321,92 +428,297 @@ object SkyRiftRenderer {
         )
     }
 
-    /** Трещины используют фиксированные цвета и альфу: вспышка не влияет на яркость. */
+    /** Расчёт геометрии крупных разломов выполняется один раз для обоих render pass. */
+    private fun createPatchFrames(distance: Double, progress: Float): List<RiftPatchFrame> {
+        val amount = progress.coerceIn(0f, 1f)
+        val frames = ArrayList<RiftPatchFrame>(RIFT_PATCHES.size)
+
+        for (patch in RIFT_PATCHES) {
+            if (amount <= patch.growthThreshold) continue
+            val rawGrowth = if (patch.growthThreshold >= 1f) {
+                0f
+            } else {
+                ((amount - patch.growthThreshold) / (1f - patch.growthThreshold)).coerceIn(0f, 1f)
+            }
+            if (rawGrowth <= 0.001f) continue
+
+            val growth = rawGrowth * rawGrowth * (3f - 2f * rawGrowth)
+            val size = patch.size * growth
+            val rot = patch.rotation.toDouble()
+            val cr = cos(rot)
+            val sr = sin(rot)
+            val outline = Array(ZIGZAG_SHAPE.size) { index ->
+                val point = ZIGZAG_SHAPE[index]
+                val px = point.x * size
+                val py = point.y * size
+                Vec3(
+                    px * cr - py * sr,
+                    px * sr + py * cr,
+                    0.0
+                )
+            }
+
+            val normal = patch.direction
+            val reference = if (abs(normal.y) > 0.8) Vec3(1.0, 0.0, 0.0) else Vec3(0.0, 1.0, 0.0)
+            val right = reference.cross(normal).normalize()
+            val up = normal.cross(right).normalize()
+            frames.add(
+                RiftPatchFrame(
+                    patch = patch,
+                    center = normal.scale(distance),
+                    right = right,
+                    up = up,
+                    scale = (distance / 100.0).toFloat() * patch.scaleMultiplier,
+                    growth = growth,
+                    size = size,
+                    outline = outline
+                )
+            )
+        }
+        return frames
+    }
+
+    /** Закрашивает сами отверстия в оболочке. Применяется обычное alpha blending. */
+    private fun drawRiftOpenings(
+        buffer: BufferBuilder,
+        matrix: Matrix4f,
+        distance: Double,
+        frames: List<RiftPatchFrame>
+    ): Boolean {
+        var emitted = false
+        for (frame in frames) {
+            // Не отправляем практически прозрачные треугольники: на таком росте
+            // отверстие ещё не видно, зато буфер тратит лишние вершины.
+            if (frame.growth <= 0.01f) continue
+            val alpha = (0.94f * frame.growth).coerceIn(0f, 0.94f)
+            for (i in frame.outline.indices) {
+                val p1 = frame.outline[i]
+                val p2 = frame.outline[(i + 1) % frame.outline.size]
+                // Тёмная сердцевина постепенно открывается из маленького разрыва.
+                vertex(buffer, matrix, frame.center, frame.right, frame.up, distance, frame.scale,
+                    0f, 0f, 0.012f, 0.002f, 0.040f, alpha)
+                vertex(buffer, matrix, frame.center, frame.right, frame.up, distance, frame.scale,
+                    p1.x.toFloat(), p1.y.toFloat(), 0.035f, 0.004f, 0.095f, alpha)
+                vertex(buffer, matrix, frame.center, frame.right, frame.up, distance, frame.scale,
+                    p2.x.toFloat(), p2.y.toFloat(), 0.026f, 0.003f, 0.070f, alpha)
+                emitted = true
+            }
+        }
+        return emitted
+    }
+
+    /** Рисует все крупные разломы в единой форме зигзагообразной трещины. */
     private fun drawRift(
         buffer: BufferBuilder,
         matrix: Matrix4f,
         distance: Double,
-        progress: Float
+        frames: List<RiftPatchFrame>
     ): Boolean {
-        val amount = progress.coerceIn(0f, 1f)
         var emittedGeometry = false
+        for (frame in frames) {
+            val fade = frame.growth.coerceIn(0f, 1f)
+            // При совсем малом росте все обводки/диски ниже альфа-порога,
+            // поэтому drawRift не должен сообщать, что буфер уже заполнен.
+            if (fade <= 0.01f) continue
+            val outline = frame.outline
+            emittedGeometry = true
 
-        for ((index, cluster) in FOG_CLUSTERS.withIndex()) {
-            if (amount < cluster.growthThreshold) continue
-
-            val clusterProgress = if (cluster.growthThreshold == 0f) {
-                amount
-            } else {
-                ((amount - cluster.growthThreshold) /
-                        (1f - cluster.growthThreshold)).coerceIn(0f, 1f)
-            }
-
-            val center = cluster.direction.scale(distance)
-            val scale = (distance / 100.0).toFloat() * cluster.scaleMultiplier
-            val normal = cluster.direction
-
-            val reference = if (abs(normal.y) > 0.8) {
-                Vec3(1.0, 0.0, 0.0)
-            } else {
-                Vec3(0.0, 1.0, 0.0)
-            }
-
-            val right = reference.cross(normal).normalize()
-            val up = normal.cross(right).normalize()
-            val points = cluster.renderPoints
-            val visibleCount = (points.size * clusterProgress)
-                .toInt()
-                .coerceAtMost(points.size)
-
-            val seedOffset = index * 2.31f
-
-            for (i in 0 until visibleCount) {
-                val point = points[i]
-                val waveX = sin(animTime * 1.5f + i * 0.5f + seedOffset) * 0.8f
-                val waveY = cos(animTime * 1.2f + i * 0.4f + seedOffset) * 0.6f
-
-                val cx = (point.x * 0.8 + waveX).toFloat()
-                val cy = (point.y + waveY).toFloat()
-
-                val alphaFade = sin(
-                    (i.toFloat() / (points.size - 1).coerceAtLeast(1)) *
-                            Math.PI.toFloat()
+            // Неоновая кромка повторяет конкретную форму разлома.
+            for (i in outline.indices) {
+                drawRiftEdge(
+                    buffer, matrix, frame, outline[i], outline[(i + 1) % outline.size],
+                    width = 0.82f, r = 0.38f, g = 0.015f, b = 0.92f, alpha = 0.72f * fade
                 )
-                if (alphaFade <= 0.001f || clusterProgress <= 0f) continue
-                emittedGeometry = true
-
-                drawRadialFogDisk(
-                    buffer, matrix, center, right, up, distance, scale,
-                    cx, cy,
-                    5f,
-                    0.45f,
-                    0.02f,
-                    0.85f,
-                    0.05f * clusterProgress * alphaFade
-                )
-
-                drawRadialFogDisk(
-                    buffer, matrix, center, right, up, distance, scale,
-                    cx + sin(animTime + i) * 0.5f,
-                    cy + cos(animTime + i) * 0.5f,
-                    2.5f,
-                    0.85f,
-                    0.10f,
-                    0.95f,
-                    0.12f * clusterProgress * alphaFade
-                )
-
-                drawRadialFogDisk(
-                    buffer, matrix, center, right, up, distance, scale,
-                    cx, cy,
-                    1f,
-                    0.98f, 0.70f, 1f,
-                    0.30f * clusterProgress * alphaFade
+                drawRiftEdge(
+                    buffer, matrix, frame, outline[i], outline[(i + 1) % outline.size],
+                    width = 0.22f, r = 0.86f, g = 0.52f, b = 1f, alpha = 0.82f * fade
                 )
             }
+
+            // Фиолетовая туманность в глубине проёма; края всё ещё остаются видимыми.
+            drawRadialFogDisk(
+                buffer, matrix, frame.center, frame.right, frame.up, distance, frame.scale,
+                0f, 0f, frame.size * 0.36f,
+                0.11f, 0.006f, 0.46f, 0.15f * fade, 12
+            )
+            drawRadialFogDisk(
+                buffer, matrix, frame.center, frame.right, frame.up, distance, frame.scale,
+                -frame.size * 0.10f, frame.size * 0.08f, frame.size * 0.19f,
+                0.25f, 0.018f, 0.70f, 0.10f * fade, 10
+            )
+
+            // Звёздное поле внутри каждой дыры. Мерцают только точки космоса, не контур.
+            for (starIndex in COSMIC_STAR_POSITIONS.indices) {
+                val position = COSMIC_STAR_POSITIONS[starIndex]
+                val seed = frame.patch.seed * 1.71f + starIndex * 2.19f
+                val x = (position.x * frame.size).toFloat()
+                val y = (position.y * frame.size).toFloat()
+                val twinkle = (0.62f + 0.32f * sin(animTime * 1.8f + seed)).coerceIn(0.15f, 0.96f)
+                drawRadialFogDisk(
+                    buffer, matrix, frame.center, frame.right, frame.up, distance, frame.scale,
+                    x, y, 0.16f * fade,
+                    0.88f, 0.90f, 0.96f, twinkle * fade * 0.20f, 5
+                )
+                drawRadialFogDisk(
+                    buffer, matrix, frame.center, frame.right, frame.up, distance, frame.scale,
+                    x, y, 0.07f * fade,
+                    0.98f, 0.98f, 1.0f, twinkle * fade * 0.24f, 4
+                )
+            }
+
+            // Планеты находятся внутри отверстий, а не отдельными точками на небе.
+            // Часть планет имеет кольца; расположение меняется от разлома к разлому.
+            val planetAnchor = when (frame.patch.seed % 4) {
+                0 -> Vec3(-0.18, 0.035, 0.0)
+                1 -> Vec3(0.24, -0.075, 0.0)
+                2 -> Vec3(-0.36, -0.055, 0.0)
+                else -> Vec3(0.08, 0.09, 0.0)
+            }
+            if (frame.patch.seed % 4 != 1) {
+                drawCosmicPlanet(
+                    buffer, matrix, frame.center, frame.right, frame.up, distance, frame.scale,
+                    (planetAnchor.x * frame.size).toFloat(),
+                    (planetAnchor.y * frame.size).toFloat(),
+                    frame.patch.seed, fade
+                )
+            }
+            if (frame.patch.seed % 3 == 0) {
+                drawCosmicPlanet(
+                    buffer, matrix, frame.center, frame.right, frame.up, distance, frame.scale,
+                    (0.40f * frame.size), (-0.16f * frame.size),
+                    frame.patch.seed + 1, fade * 0.78f
+                )
+            }
+
+        }
+        return emittedGeometry
+    }
+
+    private fun drawCosmicPlanet(
+        buffer: BufferBuilder,
+        matrix: Matrix4f,
+        center: Vec3,
+        right: Vec3,
+        up: Vec3,
+        distance: Double,
+        scale: Float,
+        x: Float,
+        y: Float,
+        seed: Int,
+        fade: Float
+    ) {
+        val (planetR, planetG, planetB) = when (seed % 3) {
+            0 -> Triple(0.16f, 0.20f, 1.0f)
+            1 -> Triple(0.76f, 0.10f, 0.52f)
+            else -> Triple(1.0f, 0.28f, 0.08f)
         }
 
-        return emittedGeometry
+        drawRadialFogDisk(
+            buffer, matrix, center, right, up, distance, scale,
+            x, y, 3.1f,
+            planetR * 0.55f, planetG * 0.50f, planetB,
+            0.25f * fade, 14
+        )
+        drawRadialFogDisk(
+            buffer, matrix, center, right, up, distance, scale,
+            x, y, 1.95f,
+            planetR, planetG, planetB,
+            0.78f * fade, 14
+        )
+        drawRadialFogDisk(
+            buffer, matrix, center, right, up, distance, scale,
+            x - 0.45f, y + 0.50f, 0.52f,
+            0.76f, 0.80f, 1f,
+            0.78f * fade, 8
+        )
+
+        if (seed % 2 == 0) {
+            drawCosmicRing(
+                buffer, matrix, center, right, up, distance, scale,
+                x, y, 3.0f, 0.22f,
+                0.70f, 0.34f, 1.0f, 0.48f * fade
+            )
+        }
+    }
+
+    private fun drawCosmicRing(
+        buffer: BufferBuilder,
+        matrix: Matrix4f,
+        center: Vec3,
+        right: Vec3,
+        up: Vec3,
+        distance: Double,
+        scale: Float,
+        cx: Float,
+        cy: Float,
+        radius: Float,
+        thickness: Float,
+        r: Float,
+        g: Float,
+        b: Float,
+        alpha: Float
+    ) {
+        if (alpha <= 0.001f) return
+        val segments = 20
+        val step = (Math.PI * 2.0 / segments).toFloat()
+        val innerRadius = radius - thickness
+        for (i in 0 until segments) {
+            val a0 = i * step
+            val a1 = (i + 1) * step
+            val ox0 = cx + cos(a0) * radius
+            val oy0 = cy + sin(a0) * radius
+            val ox1 = cx + cos(a1) * radius
+            val oy1 = cy + sin(a1) * radius
+            val ix0 = cx + cos(a0) * innerRadius
+            val iy0 = cy + sin(a0) * innerRadius
+            val ix1 = cx + cos(a1) * innerRadius
+            val iy1 = cy + sin(a1) * innerRadius
+
+            vertex(buffer, matrix, center, right, up, distance, scale, ox0, oy0, r, g, b, alpha)
+            vertex(buffer, matrix, center, right, up, distance, scale, ox1, oy1, r, g, b, alpha)
+            vertex(buffer, matrix, center, right, up, distance, scale, ix0, iy0, r, g, b, alpha)
+            vertex(buffer, matrix, center, right, up, distance, scale, ix0, iy0, r, g, b, alpha)
+            vertex(buffer, matrix, center, right, up, distance, scale, ox1, oy1, r, g, b, alpha)
+            vertex(buffer, matrix, center, right, up, distance, scale, ix1, iy1, r, g, b, alpha)
+        }
+    }
+
+
+    private fun drawRiftEdge(
+        buffer: BufferBuilder,
+        matrix: Matrix4f,
+        frame: RiftPatchFrame,
+        p1: Vec3,
+        p2: Vec3,
+        width: Float,
+        r: Float,
+        g: Float,
+        b: Float,
+        alpha: Float
+    ) {
+        if (alpha <= 0.001f) return
+        val dx = (p2.x - p1.x).toFloat()
+        val dy = (p2.y - p1.y).toFloat()
+        val length = sqrt(dx * dx + dy * dy).coerceAtLeast(0.001f)
+        val nx = -dy / length * width
+        val ny = dx / length * width
+        val x1 = p1.x.toFloat()
+        val y1 = p1.y.toFloat()
+        val x2 = p2.x.toFloat()
+        val y2 = p2.y.toFloat()
+
+        vertex(buffer, matrix, frame.center, frame.right, frame.up, frame.center.length(), frame.scale,
+            x1 + nx, y1 + ny, r, g, b, alpha)
+        vertex(buffer, matrix, frame.center, frame.right, frame.up, frame.center.length(), frame.scale,
+            x1 - nx, y1 - ny, r, g, b, alpha)
+        vertex(buffer, matrix, frame.center, frame.right, frame.up, frame.center.length(), frame.scale,
+            x2 - nx, y2 - ny, r, g, b, alpha)
+        vertex(buffer, matrix, frame.center, frame.right, frame.up, frame.center.length(), frame.scale,
+            x1 + nx, y1 + ny, r, g, b, alpha)
+        vertex(buffer, matrix, frame.center, frame.right, frame.up, frame.center.length(), frame.scale,
+            x2 - nx, y2 - ny, r, g, b, alpha)
+        vertex(buffer, matrix, frame.center, frame.right, frame.up, frame.center.length(), frame.scale,
+            x2 + nx, y2 + ny, r, g, b, alpha)
     }
 
     /** Добавляет один радиальный диск в общий буфер; не создаёт и не отправляет отдельный буфер. */
@@ -526,9 +838,53 @@ object SkyRiftRenderer {
         val player = mc.player ?: return
         val level = mc.level ?: return
 
+        if (SkyBreakClientState.openingFlashTicks > 0) {
+            val remaining = SkyBreakClientState.openingFlashTicks
+            SkyBreakClientState.openingFlashIntensity = if (remaining > 31) {
+                0.92f
+            } else {
+                (remaining / 31f * 0.92f).coerceIn(0f, 0.92f)
+            }
+            SkyBreakClientState.openingFlashTicks--
+        } else {
+            SkyBreakClientState.openingFlashIntensity = 0f
+        }
+
+        val riftStage = SkyBreakClientState.eventStage == SkyEventStage.RIFT_OPENING ||
+                SkyBreakClientState.eventStage == SkyEventStage.METEOR_STORM
+        if (riftStage && SkyBreakClientState.riftProgress > 0.22f) {
+            if (shardCooldown > 0) {
+                shardCooldown--
+            } else {
+                // Клиентские обломки не взаимодействуют с блоками: это лёгкий визуальный слой.
+                repeat(Random.nextInt(1, 3)) {
+                    val startX = player.x + Random.nextDouble(-52.0, 52.0)
+                    val startY = player.y + Random.nextDouble(58.0, 95.0)
+                    val startZ = player.z + Random.nextDouble(-52.0, 52.0)
+                    val vx = Random.nextDouble(-0.42, 0.42)
+                    val vy = Random.nextDouble(-1.75, -0.75)
+                    val vz = Random.nextDouble(-0.42, 0.42)
+                    level.addParticle(
+                        net.minecraft.core.particles.ParticleTypes.REVERSE_PORTAL,
+                        true, startX, startY, startZ, vx, vy, vz
+                    )
+                    if (Random.nextBoolean()) {
+                        level.addParticle(
+                            net.minecraft.core.particles.ParticleTypes.END_ROD,
+                            true, startX, startY, startZ, vx * 0.6, vy, vz * 0.6
+                        )
+                    }
+                }
+                shardCooldown = Random.nextInt(3, 8)
+            }
+        } else {
+            shardCooldown = 0
+        }
+
         if (
             !SkyBreakClientState.isBroken ||
-            SkyBreakClientState.riftProgress <= 0f
+            SkyBreakClientState.riftProgress <= 0f ||
+            SkyBreakClientState.eventStage == SkyEventStage.RESTORING
         ) {
             return
         }

@@ -39,7 +39,8 @@ class MeteorEntity : Entity {
         STAR,
         GIANT,
         FRAGMENT,
-        DECORATIVE_FRAGMENT
+        DECORATIVE_FRAGMENT,
+        SKY_SHARD
     }
 
     private var explosionPower: Int = 4
@@ -47,7 +48,7 @@ class MeteorEntity : Entity {
     private val skyfallForcedChunks = mutableSetOf<Pair<Int, Int>>()
 
     var meteorType: MeteorType
-        get() = MeteorType.entries[entityData.get(TYPE_ACCESSOR).toInt().coerceIn(0, 4)]
+        get() = MeteorType.entries[entityData.get(TYPE_ACCESSOR).toInt().coerceIn(0, 5)]
         set(value) {
             entityData.set(TYPE_ACCESSOR, value.ordinal.toByte())
         }
@@ -87,6 +88,28 @@ class MeteorEntity : Entity {
             (target.y - y) / duration,
             (target.z - z) / duration
         )
+    }
+
+    /**
+     * Настраивает маршрут падающего треугольного фрагмента и временно держит его чанки в ticking-состоянии.
+     * Это отдельная траектория: она не включает взрыв гигантского сюжетного метеорита.
+     */
+    fun configureSkyShardFlight(target: Vec3, speed: Double) {
+        releaseSkyfallChunkTickets()
+        meteorType = MeteorType.SKY_SHARD
+
+        val serverLevel = level() as? ServerLevel ?: return
+        skyfallForcedChunks.addAll(
+            MeteorChunkTickets.forceFlightPath(
+                level = serverLevel,
+                owner = uuid,
+                start = position(),
+                target = target
+            )
+        )
+
+        val direction = target.subtract(position()).normalize()
+        deltaMovement = direction.scale(speed.coerceAtLeast(0.1))
     }
 
     private fun releaseSkyfallChunkTickets() {
@@ -189,6 +212,7 @@ class MeteorEntity : Entity {
             MeteorType.GIANT -> tickGiant()
             MeteorType.FRAGMENT -> tickFragment()
             MeteorType.DECORATIVE_FRAGMENT -> tickDecorativeFragment()
+            MeteorType.SKY_SHARD -> tickSkyShard()
         }
 
         if (y < level().minBuildHeight) {
@@ -308,6 +332,68 @@ class MeteorEntity : Entity {
             return
         }
         spawnServerTrailParticles(Color(255, 150, 45), Color(190, 35, 15), 2.0f)
+    }
+
+    // ------------------------------------------------------------
+    // БОЛЬШОЙ ТРЕУГОЛЬНЫЙ ФРАГМЕНТ КОСМИЧЕСКОГО НЕБА
+    // ------------------------------------------------------------
+
+    private fun tickSkyShard() {
+        if (level().isClientSide) {
+            // На клиенте сохраняем фиолетовый шлейф вокруг большого треугольника.
+            repeat(3) {
+                level().addParticle(
+                    ParticleTypes.REVERSE_PORTAL,
+                    x + (random.nextDouble() - 0.5) * 4.0,
+                    y + (random.nextDouble() - 0.5) * 4.0,
+                    z + (random.nextDouble() - 0.5) * 4.0,
+                    -deltaMovement.x * 0.12,
+                    -deltaMovement.y * 0.08,
+                    -deltaMovement.z * 0.12
+                )
+            }
+            return
+        }
+
+        val serverLevel = level() as? ServerLevel ?: return
+        if (tickCount % 2 == 0) {
+            serverLevel.sendParticles(
+                ParticleTypes.PORTAL,
+                x, y, z,
+                5,
+                1.8, 1.8, 1.8,
+                0.035
+            )
+        }
+        spawnServerTrailParticles(Color(175, 45, 255), Color(25, 2, 75), 5.2f)
+
+        // При касании земли фрагмент даёт фиолетовый импульс и исчезает.
+        // В отличие от обычных метеоритов он не взрывает и не меняет блоки.
+        if (onGround() || verticalCollision || horizontalCollision || tickCount >= 105) {
+            serverLevel.sendParticles(
+                ParticleTypes.PORTAL,
+                x, y, z,
+                28,
+                2.2, 2.0, 2.2,
+                0.12
+            )
+            serverLevel.sendParticles(
+                ParticleTypes.END_ROD,
+                x, y, z,
+                12,
+                1.8, 1.6, 1.8,
+                0.08
+            )
+            serverLevel.playSound(
+                null,
+                blockPosition(),
+                SoundEvents.GLASS_BREAK,
+                SoundSource.WEATHER,
+                2.4f,
+                0.45f + random.nextFloat() * 0.2f
+            )
+            discard()
+        }
     }
 
     // ------------------------------------------------------------
@@ -540,10 +626,10 @@ class MeteorEntity : Entity {
     }
 
     override fun getBoundingBoxForCulling(): AABB {
-        return if (meteorType == MeteorType.GIANT) {
-            super.getBoundingBoxForCulling().inflate(500.0)
-        } else {
-            super.getBoundingBoxForCulling().inflate(2.0)
+        return when (meteorType) {
+            MeteorType.GIANT -> super.getBoundingBoxForCulling().inflate(500.0)
+            MeteorType.SKY_SHARD -> super.getBoundingBoxForCulling().inflate(24.0)
+            else -> super.getBoundingBoxForCulling().inflate(2.0)
         }
     }
 
@@ -551,7 +637,7 @@ class MeteorEntity : Entity {
 
     override fun readAdditionalSaveData(compound: CompoundTag) {
         explosionPower = compound.getInt("ExplosionPower")
-        meteorType = MeteorType.entries[compound.getInt("MeteorType").coerceIn(0, 4)]
+        meteorType = MeteorType.entries[compound.getInt("MeteorType").coerceIn(0, 5)]
     }
 
     override fun addAdditionalSaveData(compound: CompoundTag) {
