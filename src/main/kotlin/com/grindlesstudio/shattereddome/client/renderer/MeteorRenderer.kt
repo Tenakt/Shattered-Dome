@@ -112,11 +112,31 @@ class MeteorRenderer(
 
         poseStack.translate(-0.5, -0.5, -0.5)
 
-        val builder = buffer.getBuffer(
-            RenderType.entityCutoutNoCull(getTextureLocation(entity))
-        )
+        val texture = getTextureLocation(entity)
 
-        renderCube(poseStack, builder, packedLight)
+        val renderType = when (entity.meteorType) {
+            MeteorEntity.MeteorType.GIANT,
+            MeteorEntity.MeteorType.FRAGMENT,
+            MeteorEntity.MeteorType.DECORATIVE_FRAGMENT -> {
+                RenderType.entityTranslucentEmissive(texture)
+            }
+
+            else -> {
+                RenderType.entityCutoutNoCull(texture)
+            }
+        }
+
+        val builder = buffer.getBuffer(renderType)
+
+        val meteorLight = when (entity.meteorType) {
+            MeteorEntity.MeteorType.GIANT,
+            MeteorEntity.MeteorType.FRAGMENT,
+            MeteorEntity.MeteorType.DECORATIVE_FRAGMENT -> LightTexture.FULL_BRIGHT
+
+            else -> packedLight
+        }
+
+        renderCube(poseStack, builder, meteorLight)
         poseStack.popPose()
 
         super.render(entity, entityYaw, partialTicks, poseStack, buffer, packedLight)

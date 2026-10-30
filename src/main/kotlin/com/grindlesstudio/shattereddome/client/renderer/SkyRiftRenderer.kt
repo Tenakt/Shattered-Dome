@@ -107,17 +107,44 @@ object SkyRiftRenderer {
     private fun generateRiftPatches(): Array<RiftPatch> {
         val random = java.util.Random(0x51A7D0L)
         val count = 8
+        val directions = mutableListOf<Vec3>()
 
-        return Array(count) { index ->
+        // Не ставим разломы равномерным кольцом и не допускаем близких соседей.
+        // Направления случайно выбираются по всей видимой полусфере; каждый новый
+        // разлом принимается только тогда, когда он достаточно далеко от предыдущих.
+        val minimumDot = cos(Math.toRadians(48.0))
+        var attempts = 0
+        while (directions.size < count && attempts < 20000) {
+            attempts++
             val azimuth = random.nextDouble() * Math.PI * 2.0
-            val vertical = 0.12 + random.nextDouble() * 0.80
+            val vertical = 0.05 + random.nextDouble() * 0.93
             val horizontal = sqrt(1.0 - vertical * vertical)
-            val direction = Vec3(
+            val candidate = Vec3(
                 horizontal * cos(azimuth),
                 vertical,
                 horizontal * sin(azimuth)
             ).normalize()
 
+            if (directions.all { existing -> existing.dot(candidate) <= minimumDot }) {
+                directions.add(candidate)
+            }
+        }
+
+        // Защитный запас на случай будущего увеличения количества разломов.
+        while (directions.size < count) {
+            val azimuth = random.nextDouble() * Math.PI * 2.0
+            val vertical = 0.05 + random.nextDouble() * 0.93
+            val horizontal = sqrt(1.0 - vertical * vertical)
+            directions.add(
+                Vec3(
+                    horizontal * cos(azimuth),
+                    vertical,
+                    horizontal * sin(azimuth)
+                ).normalize()
+            )
+        }
+
+        return Array(count) { index ->
             val growthThreshold = if (index == 0) {
                 0f
             } else {
@@ -125,7 +152,7 @@ object SkyRiftRenderer {
             }
 
             RiftPatch(
-                direction = direction,
+                direction = directions[index],
                 growthThreshold = growthThreshold,
                 size = 24f + random.nextFloat() * 13f,
                 rotation = (random.nextFloat() - 0.5f) * 1.15f,

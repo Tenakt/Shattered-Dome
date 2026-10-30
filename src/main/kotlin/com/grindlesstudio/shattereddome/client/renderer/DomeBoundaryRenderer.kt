@@ -159,7 +159,9 @@ object DomeBoundaryRenderer {
             }
         }
 
-        drawPanelPulses(event, width, height)
+        // Экранные восьмиугольники отключены: они выглядели как лишние круги поверх мира.
+        // Весь код анимации панелей и drawOctagon оставлен, чтобы не терять логику эффекта.
+        // drawPanelPulses(event, width, height)
         drawOpeningFlash(event, width, height)
     }
 

@@ -1,4 +1,3 @@
-
 package com.grindlesstudio.shattereddome.client
 
 import com.grindlesstudio.shattereddome.ShatteredDome
@@ -40,10 +39,13 @@ object SkyBreakClientState {
 
 /**
  * Встроенный трек Creator вместо сирены.
+ *
+ * RECORDS используется намеренно: обычная фоновая музыка Minecraft
+ * относится к MUSIC и может быть отключена отдельно.
  */
 class SkyBreakCreatorMusic : AbstractTickableSoundInstance(
     SoundEvents.MUSIC_DISC_CREATOR.value(),
-    SoundSource.MUSIC,
+    SoundSource.RECORDS,
     SoundInstance.createUnseededRandom()
 ) {
     init {
@@ -150,14 +152,22 @@ object SkyBreakClientHandler {
         SkyRiftRenderer.tickMeteor()
         SkyRiftRenderer.tick(mc)
 
-        if (!SkyBreakClientState.isBroken) {
+        val eventActive =
+            SkyBreakClientState.isBroken ||
+                    SkyBreakClientState.eventStage != SkyEventStage.INACTIVE
+
+        if (!eventActive) {
             creatorMusic?.let { mc.soundManager.stop(it) }
             creatorMusic = null
             creatorMusicStarted = false
             return
         }
 
-        // Запускаем музыку один раз в начале события.
+        // Глушим стандартную фоновую музыку Minecraft на всём протяжении события.
+        // Creator находится в RECORDS, поэтому эта команда его не останавливает.
+        mc.soundManager.stop(null, SoundSource.MUSIC)
+
+        // Запускаем Creator один раз на стадии пробуждения.
         if (
             !creatorMusicStarted &&
             SkyBreakClientState.eventStage == SkyEventStage.AWAKENING
@@ -168,7 +178,7 @@ object SkyBreakClientHandler {
             creatorMusicStarted = true
         }
 
-        // Если трек закончился естественным образом, не запускаем его повторно.
+        // Если Creator закончился естественным образом, не запускаем его повторно.
         if (creatorMusic?.isStopped == true) {
             creatorMusic = null
         }

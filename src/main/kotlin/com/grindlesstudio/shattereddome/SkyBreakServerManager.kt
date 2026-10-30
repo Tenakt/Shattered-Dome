@@ -9,11 +9,13 @@ import com.grindlesstudio.shattereddome.network.SyncSkyFlashPayload
 import com.grindlesstudio.shattereddome.network.SkyEventStage
 import com.grindlesstudio.shattereddome.world.DomeWorldData
 import net.minecraft.core.particles.ParticleTypes
+import net.minecraft.network.chat.Component
 import net.minecraft.network.protocol.game.ClientboundSetTimePacket
 import net.minecraft.server.level.ServerLevel
 import net.minecraft.server.level.ServerPlayer
 import net.minecraft.sounds.SoundEvents
 import net.minecraft.sounds.SoundSource
+import net.minecraft.world.entity.player.Player
 import net.minecraft.world.level.GameRules
 import net.minecraft.world.level.Level
 import net.minecraft.world.level.levelgen.Heightmap
@@ -21,6 +23,7 @@ import net.minecraft.world.phys.Vec3
 import net.neoforged.bus.api.SubscribeEvent
 import net.neoforged.fml.common.EventBusSubscriber
 import net.neoforged.neoforge.event.RegisterCommandsEvent
+import net.neoforged.neoforge.event.entity.player.CanPlayerSleepEvent
 import net.neoforged.neoforge.event.entity.player.PlayerEvent
 import net.neoforged.neoforge.event.tick.ServerTickEvent
 import net.neoforged.neoforge.network.PacketDistributor
@@ -86,6 +89,10 @@ object SkyBreakServerManager {
         riftMeteorCooldown = 80
         stormAfterBurstTimer = 0
         restorationTimer = 0
+
+        for (player in level.players()) {
+            if (player.isSleeping) player.stopSleeping()
+        }
 
         val data = DomeWorldData.get(level)
         data.isSkyBroken = true
@@ -539,6 +546,19 @@ object SkyBreakServerEvents {
     fun onServerTick(event: ServerTickEvent.Post) {
         val overworld = event.server.getLevel(Level.OVERWORLD) ?: return
         SkyBreakServerManager.tick(overworld)
+    }
+
+    @SubscribeEvent
+    @JvmStatic
+    fun onCanPlayerSleep(event: CanPlayerSleepEvent) {
+        if (SkyBreakServerManager.phase == SkyBreakPhase.INACTIVE) return
+
+        // Нельзя лечь спать и перескочить время, пока событие полностью не завершится.
+        event.setProblem(Player.BedSleepingProblem.OTHER_PROBLEM)
+        event.entity.displayClientMessage(
+            Component.literal("Во время разлома нельзя пропустить ночь."),
+            true
+        )
     }
 
     @SubscribeEvent
